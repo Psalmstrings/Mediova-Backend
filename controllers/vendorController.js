@@ -199,7 +199,7 @@ const createCampaign = async (req, res, next) => {
     const settings = await AdminSettings.findOne().select('whatsappNumber defaultWhatsAppMessage');
     const waNumber = (settings?.whatsappNumber || '+2348012345678').replace(/[^0-9]/g, '');
     const waMsg = encodeURIComponent(
-      (settings?.defaultWhatsAppMessage || 'Hello DOPtv Team, I have submitted advertising order #{ORDER_NUMBER} for "{TITLE}" and would like to complete payment.')
+      (settings?.defaultWhatsAppMessage || 'Hello MEDIOVA Team, I have submitted advertising order #{ORDER_NUMBER} for "{TITLE}" and would like to complete payment.')
         .replace('{ORDER_NUMBER}', orderNumber)
         .replace('{TITLE}', title)
     );

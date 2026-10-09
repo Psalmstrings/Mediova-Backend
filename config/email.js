@@ -54,8 +54,8 @@ const sendEmail = async ({ to, subject, html, text }) => {
     const fromAddress =
       process.env.EMAIL_FROM ||
       (process.env.NODEMAILER_EMAIL
-        ? `"DOPtv Advertising" <${process.env.NODEMAILER_EMAIL}>`
-        : '"DOPtv Advertising" <no-reply@doptv.ng>');
+        ? `"MEDIOVA" <${process.env.NODEMAILER_EMAIL}>`
+        : '"MEDIOVA" <no-reply@mediova.ng>');
 
     const info = await transporter.sendMail({
       from: fromAddress,

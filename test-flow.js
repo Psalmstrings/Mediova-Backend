@@ -16,7 +16,7 @@ const req = async (path, options = {}) => {
 
 const runTests = async () => {
   console.log('\n======================================================');
-  console.log('🧪 RUNNING DOPTV END-TO-END WORKFLOW INTEGRATION TEST');
+  console.log('🧪 RUNNING MEDIOVA END-TO-END WORKFLOW INTEGRATION TEST');
   console.log('======================================================\n');
 
   try {
@@ -71,7 +71,12 @@ const runTests = async () => {
     // 6. Admin Login
     const adminLogin = await req('/auth/login', {
       method: 'POST',
-      body: JSON.stringify({ email: 'admin@doptv.ng', password: 'Admin@123456' }),
+      body: JSON.stringify({ email: 'admin@mediova.ng', password: 'Admin@123456' }),
+    }).catch(async () => {
+      return await req('/auth/login', {
+        method: 'POST',
+        body: JSON.stringify({ email: 'admin@doptv.ng', password: 'Admin@123456' }),
+      });
     });
     const adminToken = adminLogin.data.token;
     console.log('✅ 6. Admin login successful:', adminLogin.data.user.name);
@@ -158,7 +163,7 @@ const runTests = async () => {
       const payRes = await req(`/admin/transactions/${tId}/pay`, {
         method: 'PATCH',
         headers: { Authorization: `Bearer ${adminToken}` },
-        body: JSON.stringify({ paymentReference: 'NIP/DOPTV/9928172', notes: 'Transferred via Zenith Bank app' }),
+        body: JSON.stringify({ paymentReference: 'NIP/MEDIOVA/9928172', notes: 'Transferred via Zenith Bank app' }),
       });
       console.log(`✅ 14. Admin marked payout completed: Reference ${payRes.data.transaction.paymentReference}`);
     }

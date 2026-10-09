@@ -74,7 +74,7 @@ app.use('/api/notifications', notificationRoutes);
 
 // Health check
 app.get('/api/health', (req, res) => {
-  res.json({ success: true, message: 'DOPtv API is running', timestamp: new Date().toISOString() });
+  res.json({ success: true, message: 'MEDIOVA API is running', timestamp: new Date().toISOString() });
 });
 
 // 404 handler
@@ -87,7 +87,7 @@ app.use(errorHandler);
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
-  console.log(`\n🚀 DOPtv Server running in ${process.env.NODE_ENV || 'development'} mode on port ${PORT}`);
+  console.log(`\n🚀 MEDIOVA Server running in ${process.env.NODE_ENV || 'development'} mode on port ${PORT}`);
   console.log(`📡 API: http://localhost:${PORT}/api`);
   console.log(`🏥 Health: http://localhost:${PORT}/api/health\n`);
 

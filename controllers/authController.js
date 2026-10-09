@@ -147,7 +147,7 @@ const register = async (req, res, next) => {
     // In-app welcome notification
     await Notification.create({
       userId: user._id,
-      title: 'Welcome to DOPtv!',
+      title: 'Welcome to MEDIOVA!',
       message: 'Please check your email to verify your account and start accepting or placing ads.',
       type: 'info',
     });

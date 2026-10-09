@@ -923,11 +923,11 @@ const testEmailService = async (req, res, next) => {
       });
     }
 
-    const testSubject = 'DOPtv Gmail SMTP Integration Test';
+    const testSubject = 'MEDIOVA Gmail SMTP Integration Test';
     const testHtml = `
       <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; padding: 24px; color: #1e293b; max-width: 600px; margin: 0 auto; border: 1px solid #e2e8f0; border-radius: 8px;">
-        <h2 style="color: #047857; margin-top: 0;">DOPtv Gmail SMTP Test Email</h2>
-        <p>This is a verification email from <strong>DOPtv</strong> confirming that Gmail SMTP with Nodemailer is working properly.</p>
+        <h2 style="color: #047857; margin-top: 0;">MEDIOVA Gmail SMTP Test Email</h2>
+        <p>This is a verification email from <strong>MEDIOVA</strong> confirming that Gmail SMTP with Nodemailer is working properly.</p>
         <div style="background: #f8fafc; padding: 14px; border-radius: 6px; margin: 16px 0; font-size: 14px;">
           <p style="margin: 0 0 6px;"><strong>Recipient:</strong> ${to}</p>
           <p style="margin: 0 0 6px;"><strong>Sender:</strong> ${process.env.NODEMAILER_EMAIL || 'Configured Gmail Account'}</p>
@@ -936,7 +936,7 @@ const testEmailService = async (req, res, next) => {
         <p style="color: #64748b; font-size: 13px;">If you received this message, the Gmail SMTP integration is operating successfully.</p>
       </div>
     `;
-    const testText = `DOPtv Gmail SMTP Integration Test\nSent to: ${to}\nTimestamp: ${new Date().toISOString()}`;
+    const testText = `MEDIOVA Gmail SMTP Integration Test\nSent to: ${to}\nTimestamp: ${new Date().toISOString()}`;
 
     const info = await sendEmail({
       to,

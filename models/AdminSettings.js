@@ -4,7 +4,7 @@ const adminSettingsSchema = new mongoose.Schema(
   {
     platformName: {
       type: String,
-      default: 'DOPtv Advertising',
+      default: 'MEDIOVA Advertising',
     },
     platformTagline: {
       type: String,
@@ -16,7 +16,7 @@ const adminSettingsSchema = new mongoose.Schema(
     },
     supportEmail: {
       type: String,
-      default: 'support@doptv.ng',
+      default: 'support@mediova.ng',
     },
     supportPhone: {
       type: String,
@@ -32,7 +32,7 @@ const adminSettingsSchema = new mongoose.Schema(
     },
     defaultWhatsAppMessage: {
       type: String,
-      default: 'Hello DOPtv Team, I have submitted advertising order #{ORDER_NUMBER} for "{TITLE}" and would like to complete payment.',
+      default: 'Hello MEDIOVA Team, I have submitted advertising order #{ORDER_NUMBER} for "{TITLE}" and would like to complete payment.',
     },
     manualPaymentInstructions: {
       type: String,
@@ -40,7 +40,7 @@ const adminSettingsSchema = new mongoose.Schema(
     },
     bankDetails: {
       bankName: { type: String, default: 'Zenith Bank Nigeria' },
-      accountName: { type: String, default: 'DOPtv Media Brokerage Ltd' },
+      accountName: { type: String, default: 'MEDIOVA Media Brokerage Ltd' },
       accountNumber: { type: String, default: '1012345678' },
     },
     minInfluencerViews: {

@@ -1,7 +1,7 @@
 {
-  "name": "doptv-server",
+  "name": "mediova-server",
   "version": "1.0.0",
-  "description": "DOPtv - WhatsApp Influencer Advertising & Gig Marketplace Backend API",
+  "description": "MEDIOVA - WhatsApp Influencer Advertising & Gig Marketplace Backend API",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",

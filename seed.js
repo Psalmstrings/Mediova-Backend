@@ -65,25 +65,31 @@ const seed = async () => {
 
   // === ADMIN SETTINGS ===
   await AdminSettings.create({
-    platformName: 'DOPtv Advertising',
+    platformName: 'MEDIOVA Advertising',
     platformTagline: 'Turn WhatsApp Status views into income. Reach real people through trusted WhatsApp audiences.',
-    supportEmail: 'support@doptv.ng',
+    supportEmail: 'support@mediova.ng',
     supportPhone: '+2348012345678',
     whatsappNumber: '+2348012345678',
     businessAddress: 'Victoria Island, Lagos, Nigeria',
+    defaultWhatsAppMessage: 'Hello MEDIOVA Team, I have submitted advertising order #{ORDER_NUMBER} for "{TITLE}" and would like to complete payment.',
+    bankDetails: {
+      bankName: 'Zenith Bank Nigeria',
+      accountName: 'MEDIOVA Media Brokerage Ltd',
+      accountNumber: '1012345678',
+    },
   });
   console.log('✅ Created admin settings');
 
   // === ADMIN ACCOUNT ===
   const adminUser = await User.create({
-    name: 'DOPtv Admin',
-    email: 'admin@doptv.ng',
+    name: 'MEDIOVA Admin',
+    email: 'admin@mediova.ng',
     password: 'Admin@123456',
     role: 'admin',
     emailVerified: true,
     accountStatus: 'active',
   });
-  console.log(`✅ Admin account: admin@doptv.ng / Admin@123456`);
+  console.log(`✅ Admin account: admin@mediova.ng / Admin@123456`);
 
   // === INFLUENCERS ===
   const influencerData = [
@@ -164,7 +170,7 @@ const seed = async () => {
 
   console.log('\n🎉 Database seeded successfully!');
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-  console.log('Admin Login: admin@doptv.ng / Admin@123456');
+  console.log('Admin Login: admin@mediova.ng / Admin@123456');
   console.log('Influencer Login: amaka@example.com / Password@123');
   console.log('Vendor Login: vendor1@example.com / Password@123');
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
