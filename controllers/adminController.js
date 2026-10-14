@@ -12,6 +12,18 @@ const AdminSettings = require('../models/AdminSettings');
 const { sendEmail } = require('../config/email');
 const emailTemplates = require('../utils/emailTemplates');
 
+/**
+ * Returns primary frontend URL for notifications
+ */
+const getClientUrl = () => {
+  if (process.env.CLIENT_URL) {
+    const urls = process.env.CLIENT_URL.split(',').map((u) => u.trim());
+    const prodUrl = urls.find((u) => u.startsWith('https://'));
+    return prodUrl || urls[0] || 'https://mediova.vercel.app';
+  }
+  return 'https://mediova.vercel.app';
+};
+
 // ============================
 // DASHBOARD
 // ============================
@@ -405,12 +417,6 @@ const updateCampaignStatus = async (req, res, next) => {
         message: `Payment for order #${campaign.orderNumber} (${campaign.title}) has been confirmed. Campaign is being prepared.`,
         type: 'payment',
       });
-      const emailData = emailTemplates.paymentConfirmed({
-        name: campaign.vendorId.name,
-        orderNumber: campaign.orderNumber,
-        campaignTitle: campaign.title,
-      });
-      await sendEmail({ to: campaign.vendorId.email, ...emailData });
     }
 
     if (status === 'Completed') {
@@ -424,13 +430,6 @@ const updateCampaignStatus = async (req, res, next) => {
         message: `Your campaign "${campaign.title}" has completed with ${gigCount} influencers and ${totalVerifiedViews.toLocaleString()} verified views.`,
         type: 'success',
       });
-      const emailData = emailTemplates.campaignCompleted({
-        name: campaign.vendorId.name,
-        campaignTitle: campaign.title,
-        totalViews: totalVerifiedViews,
-        influencersCount: gigCount,
-      });
-      await sendEmail({ to: campaign.vendorId.email, ...emailData });
     }
 
     res.status(200).json({ success: true, message: 'Campaign updated', campaign });
@@ -489,14 +488,32 @@ const assignGigs = async (req, res, next) => {
           link: `/influencer/gigs/${gig._id}`,
         });
 
-        const clientUrl = process.env.CLIENT_URL || 'http://localhost:5173';
+        const clientUrl = getClientUrl();
         const emailData = emailTemplates.gigAssigned({
           name: influencer.name,
           campaignTitle: campaign.title,
           reward,
           gigUrl: `${clientUrl}/influencer/gigs/${gig._id}`,
+          instructions: campaign.instructions || campaign.adCopy || '',
+          duration: campaign.duration || '24 Hours',
+          deadline: campaign.endDate ? new Date(campaign.endDate).toLocaleDateString() : '',
         });
-        await sendEmail({ to: influencer.email, ...emailData });
+
+        // Send email only after gig has been successfully saved to DB.
+        // If email service fails, the gig assignment must remain successful and NOT be rolled back.
+        try {
+          const emailResult = await sendEmail({
+            to: influencer.email,
+            subject: emailData.subject,
+            html: emailData.html,
+            text: emailData.text,
+          });
+          if (emailResult && emailResult.error) {
+            console.error(`[assignGigs] Email notification failed for influencer (${influencer._id}): ${emailResult.error}`);
+          }
+        } catch (emailErr) {
+          console.error(`[assignGigs] Email dispatch exception for influencer (${influencer._id}): ${emailErr.message}`);
+        }
       }
     }
 
@@ -562,16 +579,6 @@ const reviewGigSubmission = async (req, res, next) => {
         message: `Your proof for "${gig.campaignId.title}" was approved! ₦${gig.reward.toLocaleString()} has been credited to your earnings.`,
         type: 'payment',
       });
-
-      const influencer = await User.findById(gig.influencerId);
-      if (influencer) {
-        const emailData = emailTemplates.gigApproved({
-          name: influencer.name,
-          campaignTitle: gig.campaignId.title,
-          reward: gig.reward,
-        });
-        await sendEmail({ to: influencer.email, ...emailData });
-      }
     } else if (reviewStatus === 'rejected') {
       gig.status = 'rejected';
       gig.rejectionReason = reviewComment || 'Proof did not meet requirements';
@@ -591,16 +598,6 @@ const reviewGigSubmission = async (req, res, next) => {
         message: `Your proof for "${gig.campaignId.title}" was not approved. Reason: ${reviewComment || 'Proof insufficient'}. Please re-submit or contact Admin.`,
         type: 'warning',
       });
-
-      const influencer = await User.findById(gig.influencerId);
-      if (influencer) {
-        const emailData = emailTemplates.gigRejected({
-          name: influencer.name,
-          campaignTitle: gig.campaignId.title,
-          reason: reviewComment,
-        });
-        await sendEmail({ to: influencer.email, ...emailData });
-      }
     }
 
     res.status(200).json({ success: true, message: `Submission ${reviewStatus}`, submission, gig });

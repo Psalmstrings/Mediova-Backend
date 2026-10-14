@@ -1,12 +1,27 @@
 const nodemailer = require('nodemailer');
 
-const transporter = nodemailer.createTransport({
-  service: 'gmail',
-  auth: {
-    user: process.env.NODEMAILER_EMAIL,
-    pass: process.env.NODEMAILER_PASS,
-  },
-});
+const createSmtpTransporter = () => {
+  const user = process.env.NODEMAILER_EMAIL;
+  const pass = process.env.NODEMAILER_PASS;
+
+  // Use direct Gmail SMTP host over SSL (port 465)
+  // This is much more reliable on cloud platforms like Render where port 587/STARTTLS often encounters timeouts
+  return nodemailer.createTransport({
+    host: 'smtp.gmail.com',
+    port: 465,
+    secure: true, // SSL
+    auth: {
+      user,
+      pass,
+    },
+    // Prevent indefinite hanging by setting socket & connection timeouts
+    connectionTimeout: 15000, // 15 seconds
+    greetingTimeout: 15000,
+    socketTimeout: 20000,
+  });
+};
+
+const transporter = createSmtpTransporter();
 
 /**
  * Verify Gmail SMTP connection at application startup

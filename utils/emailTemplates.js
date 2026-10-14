@@ -94,23 +94,43 @@ const templates = {
     };
   },
 
-  gigAssigned: ({ name, campaignTitle, reward, gigUrl }) => {
+  gigAssigned: ({ name, campaignTitle, reward, gigUrl, instructions, duration, deadline }) => {
+    let detailsHtml = `
+      <div style="background: #f1f5f9; padding: 18px; border-radius: 8px; margin: 18px 0; border-left: 4px solid #059669;">
+        <p style="margin: 0 0 8px;"><strong>Campaign / Task:</strong> ${campaignTitle}</p>
+        <p style="margin: 0 0 8px;"><strong>Payout Reward:</strong> <span style="color: #059669; font-weight: bold; font-size: 18px;">₦${Number(reward).toLocaleString()}</span></p>
+    `;
+
+    if (duration) {
+      detailsHtml += `<p style="margin: 0 0 8px;"><strong>Duration:</strong> ${duration}</p>`;
+    }
+    if (deadline) {
+      detailsHtml += `<p style="margin: 0 0 8px;"><strong>Deadline:</strong> ${deadline}</p>`;
+    }
+    if (instructions) {
+      detailsHtml += `
+        <div style="margin-top: 10px; padding-top: 10px; border-top: 1px dashed #cbd5e1;">
+          <strong>Instructions / Details:</strong>
+          <p style="margin: 4px 0 0; color: #475569; font-size: 14px;">${instructions}</p>
+        </div>
+      `;
+    }
+    detailsHtml += `</div>`;
+
     const content = `
       <h2>🎯 New Advertising Gig Assigned!</h2>
       <p>Hello <strong>${name}</strong>,</p>
       <p>The ${BRANDING.APP_NAME} Admin has matched and assigned a new advertising gig to your WhatsApp Status audience!</p>
-      <div style="background: #f1f5f9; padding: 16px; border-radius: 8px; margin: 16px 0;">
-        <p style="margin: 0 0 8px;"><strong>Campaign:</strong> ${campaignTitle}</p>
-        <p style="margin: 0;"><strong>Reward:</strong> <span style="color: #059669; font-weight: bold; font-size: 18px;">₦${Number(reward).toLocaleString()}</span></p>
-      </div>
+      ${detailsHtml}
       <p style="text-align: center;">
-        <a href="${gigUrl}" class="cta-btn">View & Accept Gig</a>
+        <a href="${gigUrl}" class="cta-btn">View & Accept Gig on MEDIOVA</a>
       </p>
+      <p><small style="color: #64748b;">Log in to your MEDIOVA Influencer Dashboard to accept this assignment and upload proof when completed.</small></p>
     `;
     return {
       subject: `New Gig Assigned: ${campaignTitle} (₦${Number(reward).toLocaleString()}) - ${BRANDING.APP_NAME}`,
       html: getBaseTemplate('New Gig Assigned', content),
-      text: `You have been assigned a new gig: ${campaignTitle} with reward ₦${reward}.`,
+      text: `Hello ${name}, you have been assigned a new gig on MEDIOVA: "${campaignTitle}" with reward ₦${Number(reward).toLocaleString()}.\nView and accept the gig at: ${gigUrl}`,
     };
   },
 

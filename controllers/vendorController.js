@@ -205,21 +205,6 @@ const createCampaign = async (req, res, next) => {
     );
     const whatsappUrl = `https://wa.me/${waNumber}?text=${waMsg}`;
 
-    // Email notification to vendor
-    const emailData = emailTemplates.orderReceived({
-      name: req.user.name,
-      orderNumber,
-      campaignTitle: title,
-      totalAmount: Number(price) || 0,
-      whatsappUrl,
-    });
-    await sendEmail({
-      to: req.user.email,
-      subject: emailData.subject,
-      html: emailData.html,
-      text: emailData.text,
-    });
-
     // Notify all admins
     const admins = await User.find({ role: 'admin' });
     for (const admin of admins) {

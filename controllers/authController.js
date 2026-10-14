@@ -9,6 +9,20 @@ const { sendEmail } = require('../config/email');
 const emailTemplates = require('../utils/emailTemplates');
 
 /**
+ * Returns the primary frontend URL for verification and reset links.
+ * Handles comma-separated values in CLIENT_URL (e.g. "https://mediova.vercel.app,http://localhost:5173")
+ */
+const getClientUrl = () => {
+  if (process.env.CLIENT_URL) {
+    const urls = process.env.CLIENT_URL.split(',').map((u) => u.trim());
+    // Prioritize production HTTPS Vercel domain if present
+    const prodUrl = urls.find((u) => u.startsWith('https://'));
+    return prodUrl || urls[0] || 'https://mediova.vercel.app';
+  }
+  return 'https://mediova.vercel.app';
+};
+
+/**
  * @desc    Register a new user (Influencer or Vendor)
  * @route   POST /api/auth/register
  * @access  Public
@@ -47,8 +61,11 @@ const register = async (req, res, next) => {
       });
     }
 
+    // Normalize email
+    const normalizedEmail = (email || '').trim().toLowerCase();
+
     // Check if user already exists
-    const userExists = await User.findOne({ email: email.toLowerCase() });
+    const userExists = await User.findOne({ email: normalizedEmail });
     if (userExists) {
       return res.status(400).json({
         success: false,
@@ -56,20 +73,21 @@ const register = async (req, res, next) => {
       });
     }
 
-    // Create base user
+    // Create base user - immediately active and verified
     const user = await User.create({
-      name,
-      email: email.toLowerCase(),
-      phone: phone || '',
+      name: (name || '').trim(),
+      email: normalizedEmail,
+      phone: (phone || '').trim(),
       password,
       role,
-      emailVerified: false,
+      emailVerified: true,
       accountStatus: 'active',
     });
 
     // Create role-specific profile
+    let profile = null;
     if (role === 'influencer') {
-      await InfluencerProfile.create({
+      profile = await InfluencerProfile.create({
         userId: user._id,
         whatsappNumber: whatsappNumber || phone || '',
         state: state || 'Lagos',
@@ -82,7 +100,7 @@ const register = async (req, res, next) => {
         verificationStatus: 'pending',
       });
     } else if (role === 'vendor') {
-      await VendorProfile.create({
+      profile = await VendorProfile.create({
         userId: user._id,
         businessName: businessName || name,
         contactPerson: contactPerson || name,
@@ -101,63 +119,31 @@ const register = async (req, res, next) => {
       });
     }
 
-    // Generate secure email verification token
-    const tokenString = crypto.randomBytes(32).toString('hex');
-    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
-
-    await VerificationToken.create({
-      userId: user._id,
-      token: tokenString,
-      type: 'email_verify',
-      expiresAt,
-    });
-
-    const clientUrl = process.env.CLIENT_URL || 'http://localhost:5173';
-    const verificationUrl = `${clientUrl}/verify-email?token=${tokenString}&email=${encodeURIComponent(user.email)}`;
-
-    // Send verification email
-    const emailData = emailTemplates.verifyEmail({
-      name: user.name,
-      verificationUrl,
-    });
-
-    const emailResult = await sendEmail({
-      to: user.email,
-      subject: emailData.subject,
-      html: emailData.html,
-      text: emailData.text,
-    });
-
-    if (emailResult && emailResult.error) {
-      // Roll back user creation to prevent orphaned unverified accounts
-      await User.findByIdAndDelete(user._id);
-      if (role === 'influencer') {
-        await InfluencerProfile.findOneAndDelete({ userId: user._id });
-      } else if (role === 'vendor') {
-        await VendorProfile.findOneAndDelete({ userId: user._id });
-      }
-      await VerificationToken.deleteMany({ userId: user._id });
-
-      return res.status(500).json({
-        success: false,
-        message: 'Failed to send verification email. Please verify your email address and try again later.',
-      });
-    }
-
     // In-app welcome notification
     await Notification.create({
       userId: user._id,
       title: 'Welcome to MEDIOVA!',
-      message: 'Please check your email to verify your account and start accepting or placing ads.',
+      message: 'Your account has been created successfully. Welcome to MEDIOVA!',
       type: 'info',
     });
 
+    const token = generateToken(user._id, user.role);
+
     res.status(201).json({
       success: true,
-      message: 'Account created successfully! We sent a verification link to your email.',
-      verificationUrl, // included for easy dev workflow / local testing
-      userId: user._id,
-      email: user.email,
+      message: 'Account created successfully! You can now log in to your dashboard.',
+      token,
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        phone: user.phone,
+        role: user.role,
+        profileImage: user.profileImage,
+        emailVerified: user.emailVerified,
+        accountStatus: user.accountStatus,
+        profile,
+      },
     });
   } catch (error) {
     next(error);
@@ -171,7 +157,7 @@ const register = async (req, res, next) => {
  */
 const verifyEmail = async (req, res, next) => {
   try {
-    const { token } = req.body;
+    const { token, email } = req.body;
 
     if (!token) {
       return res.status(400).json({
@@ -180,58 +166,48 @@ const verifyEmail = async (req, res, next) => {
       });
     }
 
-    const verificationToken = await VerificationToken.findOne({
-      token,
-      type: 'email_verify',
-      expiresAt: { $gt: Date.now() },
-    });
+    const cleanToken = token ? String(token).trim() : null;
+    const normalizedEmail = email ? String(email).trim().toLowerCase() : null;
 
-    if (!verificationToken) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid or expired verification link. Please request a new one.',
+    let user = null;
+    if (cleanToken) {
+      const verificationToken = await VerificationToken.findOne({
+        token: cleanToken,
+        type: 'email_verify',
       });
+      if (verificationToken) {
+        user = await User.findById(verificationToken.userId);
+        await VerificationToken.deleteMany({ userId: verificationToken.userId, type: 'email_verify' });
+      }
     }
 
-    const user = await User.findById(verificationToken.userId);
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: 'User account not found.',
-      });
+    if (!user && normalizedEmail) {
+      user = await User.findOne({ email: normalizedEmail });
     }
 
-    user.emailVerified = true;
-    await user.save();
-
-    // Delete token
-    await VerificationToken.findByIdAndDelete(verificationToken._id);
-
-    // Send welcome email
-    const welcomeData = emailTemplates.welcome({
-      name: user.name,
-      role: user.role,
-    });
-    await sendEmail({
-      to: user.email,
-      subject: welcomeData.subject,
-      html: welcomeData.html,
-      text: welcomeData.text,
-    });
-
-    const jwtToken = generateToken(user._id, user.role);
+    if (user) {
+      if (!user.emailVerified) {
+        user.emailVerified = true;
+        await user.save();
+      }
+      const jwtToken = generateToken(user._id, user.role);
+      return res.status(200).json({
+        success: true,
+        message: 'Email verification is no longer required on MEDIOVA. Your account is active.',
+        token: jwtToken,
+        user: {
+          id: user._id,
+          name: user.name,
+          email: user.email,
+          role: user.role,
+          emailVerified: true,
+        },
+      });
+    }
 
     res.status(200).json({
       success: true,
-      message: 'Your email has been verified successfully.',
-      token: jwtToken,
-      user: {
-        id: user._id,
-        name: user.name,
-        email: user.email,
-        role: user.role,
-        emailVerified: user.emailVerified,
-      },
+      message: 'Email verification is no longer required on MEDIOVA. You can log in directly.',
     });
   } catch (error) {
     next(error);
@@ -239,65 +215,24 @@ const verifyEmail = async (req, res, next) => {
 };
 
 /**
- * @desc    Resend verification email
+ * @desc    Resend verification email (Stubbed for compatibility)
  * @route   POST /api/auth/resend-verification
  * @access  Public
  */
 const resendVerification = async (req, res, next) => {
   try {
     const { email } = req.body;
-    if (!email) {
-      return res.status(400).json({ success: false, message: 'Please provide an email address' });
+    if (email) {
+      const normalizedEmail = String(email).trim().toLowerCase();
+      const user = await User.findOne({ email: normalizedEmail });
+      if (user && !user.emailVerified) {
+        user.emailVerified = true;
+        await user.save();
+      }
     }
-
-    const user = await User.findOne({ email: email.toLowerCase() });
-    if (!user) {
-      return res.status(404).json({ success: false, message: 'No account found with this email' });
-    }
-
-    if (user.emailVerified) {
-      return res.status(400).json({ success: false, message: 'This email is already verified. You can log in.' });
-    }
-
-    // Invalidate existing tokens
-    await VerificationToken.deleteMany({ userId: user._id, type: 'email_verify' });
-
-    const tokenString = crypto.randomBytes(32).toString('hex');
-    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
-
-    await VerificationToken.create({
-      userId: user._id,
-      token: tokenString,
-      type: 'email_verify',
-      expiresAt,
-    });
-
-    const clientUrl = process.env.CLIENT_URL || 'http://localhost:5173';
-    const verificationUrl = `${clientUrl}/verify-email?token=${tokenString}&email=${encodeURIComponent(user.email)}`;
-
-    const emailData = emailTemplates.verifyEmail({
-      name: user.name,
-      verificationUrl,
-    });
-
-    const emailResult = await sendEmail({
-      to: user.email,
-      subject: emailData.subject,
-      html: emailData.html,
-      text: emailData.text,
-    });
-
-    if (emailResult && emailResult.error) {
-      return res.status(500).json({
-        success: false,
-        message: 'Failed to send verification email. Please try again later.',
-      });
-    }
-
     res.status(200).json({
       success: true,
-      message: 'A new verification email has been sent. Please check your inbox.',
-      verificationUrl,
+      message: 'Email verification is no longer required on MEDIOVA. You can log in directly with your email and password.',
     });
   } catch (error) {
     next(error);
@@ -320,7 +255,8 @@ const login = async (req, res, next) => {
       });
     }
 
-    const user = await User.findOne({ email: email.toLowerCase() }).select('+password');
+    const normalizedEmail = (email || '').trim().toLowerCase();
+    const user = await User.findOne({ email: normalizedEmail }).select('+password');
     if (!user) {
       return res.status(401).json({
         success: false,
@@ -343,13 +279,10 @@ const login = async (req, res, next) => {
       });
     }
 
-    if (!user.emailVerified && user.role !== 'admin') {
-      return res.status(403).json({
-        success: false,
-        requiresVerification: true,
-        email: user.email,
-        message: 'Please verify your email address before logging in.',
-      });
+    // Ensure previously unverified accounts are automatically marked verified and never blocked
+    if (!user.emailVerified) {
+      user.emailVerified = true;
+      await user.save();
     }
 
     const token = generateToken(user._id, user.role);
@@ -425,55 +358,9 @@ const getMe = async (req, res, next) => {
 const forgotPassword = async (req, res, next) => {
   try {
     const { email } = req.body;
-    const user = await User.findOne({ email: email ? email.toLowerCase() : '' });
-
-    if (!user) {
-      // Return success to avoid email enumeration
-      return res.status(200).json({
-        success: true,
-        message: 'If an account with that email exists, password reset instructions have been sent.',
-      });
-    }
-
-    await VerificationToken.deleteMany({ userId: user._id, type: 'password_reset' });
-
-    const tokenString = crypto.randomBytes(32).toString('hex');
-    const expiresAt = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
-
-    await VerificationToken.create({
-      userId: user._id,
-      token: tokenString,
-      type: 'password_reset',
-      expiresAt,
-    });
-
-    const clientUrl = process.env.CLIENT_URL || 'http://localhost:5173';
-    const resetUrl = `${clientUrl}/reset-password?token=${tokenString}`;
-
-    const emailData = emailTemplates.passwordReset({
-      name: user.name,
-      resetUrl,
-    });
-
-    const emailResult = await sendEmail({
-      to: user.email,
-      subject: emailData.subject,
-      html: emailData.html,
-      text: emailData.text,
-    });
-
-    if (emailResult && emailResult.error) {
-      await VerificationToken.deleteMany({ userId: user._id, token: tokenString });
-      return res.status(500).json({
-        success: false,
-        message: 'Failed to send password reset email. Please try again later.',
-      });
-    }
-
-    res.status(200).json({
-      success: true,
-      message: 'If an account with that email exists, password reset instructions have been sent.',
-      ...(process.env.NODE_ENV === 'development' ? { resetUrl } : {}),
+    return res.status(400).json({
+      success: false,
+      message: 'Automated email password reset is no longer available as email notifications are restricted to gig assignments. Please contact MEDIOVA support or your platform administrator on WhatsApp to reset your password.',
     });
   } catch (error) {
     next(error);

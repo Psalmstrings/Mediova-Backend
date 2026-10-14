@@ -5,6 +5,7 @@ const helmet = require('helmet');
 const morgan = require('morgan');
 const rateLimit = require('express-rate-limit');
 const path = require('path');
+const mongoose = require('mongoose');
 
 const connectDB = require('./config/db');
 const { verifyTransporter } = require('./config/email');
@@ -99,7 +100,13 @@ app.use('/api/notifications', notificationRoutes);
 
 // Health check
 app.get('/api/health', (req, res) => {
-  res.json({ success: true, message: 'MEDIOVA API is running', timestamp: new Date().toISOString() });
+  const dbState = ['disconnected', 'connected', 'connecting', 'disconnecting'][mongoose.connection.readyState] || 'unknown';
+  res.json({
+    success: true,
+    message: 'MEDIOVA API is running',
+    database: dbState,
+    timestamp: new Date().toISOString(),
+  });
 });
 
 // 404 handler
