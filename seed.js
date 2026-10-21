@@ -91,88 +91,92 @@ const seed = async () => {
   });
   console.log(`✅ Admin account: admin@mediova.ng / Admin@123456`);
 
-  // === INFLUENCERS ===
-  const influencerData = [
-    { name: 'Amaka Okafor', email: 'amaka@example.com', state: 'Lagos', city: 'Lagos', lga: 'Eti-Osa', area: 'Lekki Phase 1', views: 3200, verifiedViews: 3000, cats: ['Fashion', 'Beauty', 'Lifestyle'] },
-    { name: 'Chidi Eze', email: 'chidi@example.com', state: 'Lagos', city: 'Lagos', lga: 'Ikeja', area: 'GRA Ikeja', views: 1800, verifiedViews: 1500, cats: ['Electronics', 'Technology', 'Finance'] },
-    { name: 'Ngozi Adeyemi', email: 'ngozi@example.com', state: 'Abuja', city: 'Abuja', lga: 'Garki', area: 'Garki District', views: 2500, verifiedViews: 2200, cats: ['Real Estate', 'Business', 'Finance'] },
-    { name: 'Tunde Bakare', email: 'tunde@example.com', state: 'Lagos', city: 'Lagos', lga: 'Surulere', area: 'Aguda', views: 900, verifiedViews: 800, cats: ['Food', 'Lifestyle', 'Events'] },
-    { name: 'Blessing Nwachukwu', email: 'blessing@example.com', state: 'Rivers', city: 'Port Harcourt', lga: 'Obio-Akpor', area: 'Rumuola', views: 1400, verifiedViews: 1200, cats: ['Fashion', 'Beauty', 'General Advertising'] },
-    { name: 'Emeka Obi', email: 'emeka@example.com', state: 'Lagos', city: 'Lagos', lga: 'Victoria Island', area: 'Victoria Island', views: 4100, verifiedViews: 4000, cats: ['Events', 'Entertainment', 'Business'] },
-    { name: 'Fatima Abdullahi', email: 'fatima@example.com', state: 'Kano', city: 'Kano', lga: 'Nassarawa', area: 'Nassarawa', views: 2100, verifiedViews: 2000, cats: ['Fashion', 'Education', 'Lifestyle'] },
-    { name: 'Segun Adewale', email: 'segun@example.com', state: 'Oyo', city: 'Ibadan', lga: 'Ibadan North', area: 'Ring Road', views: 1100, verifiedViews: 1000, cats: ['Automobile', 'Finance', 'Business'] },
-  ];
+  // Dummy users only if explicitly requested (--with-dummies)
+  const includeDummies = process.argv.includes('--with-dummies');
+  if (includeDummies) {
+    // === INFLUENCERS ===
+    const influencerData = [
+      { name: 'Amaka Okafor', email: 'amaka@example.com', state: 'Lagos', city: 'Lagos', lga: 'Eti-Osa', area: 'Lekki Phase 1', views: 3200, verifiedViews: 3000, cats: ['Fashion', 'Beauty', 'Lifestyle'] },
+      { name: 'Chidi Eze', email: 'chidi@example.com', state: 'Lagos', city: 'Lagos', lga: 'Ikeja', area: 'GRA Ikeja', views: 1800, verifiedViews: 1500, cats: ['Electronics', 'Technology', 'Finance'] },
+      { name: 'Ngozi Adeyemi', email: 'ngozi@example.com', state: 'Abuja', city: 'Abuja', lga: 'Garki', area: 'Garki District', views: 2500, verifiedViews: 2200, cats: ['Real Estate', 'Business', 'Finance'] },
+      { name: 'Tunde Bakare', email: 'tunde@example.com', state: 'Lagos', city: 'Lagos', lga: 'Surulere', area: 'Aguda', views: 900, verifiedViews: 800, cats: ['Food', 'Lifestyle', 'Events'] },
+      { name: 'Blessing Nwachukwu', email: 'blessing@example.com', state: 'Rivers', city: 'Port Harcourt', lga: 'Obio-Akpor', area: 'Rumuola', views: 1400, verifiedViews: 1200, cats: ['Fashion', 'Beauty', 'General Advertising'] },
+      { name: 'Emeka Obi', email: 'emeka@example.com', state: 'Lagos', city: 'Lagos', lga: 'Victoria Island', area: 'Victoria Island', views: 4100, verifiedViews: 4000, cats: ['Events', 'Entertainment', 'Business'] },
+      { name: 'Fatima Abdullahi', email: 'fatima@example.com', state: 'Kano', city: 'Kano', lga: 'Nassarawa', area: 'Nassarawa', views: 2100, verifiedViews: 2000, cats: ['Fashion', 'Education', 'Lifestyle'] },
+      { name: 'Segun Adewale', email: 'segun@example.com', state: 'Oyo', city: 'Ibadan', lga: 'Ibadan North', area: 'Ring Road', views: 1100, verifiedViews: 1000, cats: ['Automobile', 'Finance', 'Business'] },
+    ];
 
-  for (let i = 0; i < influencerData.length; i++) {
-    const d = influencerData[i];
-    const user = await User.create({
-      name: d.name,
-      email: d.email,
-      password: 'Password@123',
-      role: 'influencer',
-      emailVerified: true,
-      accountStatus: 'active',
-      phone: `+23480${10000000 + i}`,
-    });
-    await InfluencerProfile.create({
-      userId: user._id,
-      whatsappNumber: `+23480${10000000 + i}`,
-      state: d.state,
-      city: d.city,
-      lga: d.lga,
-      area: d.area,
-      additionalAreas: [],
-      averageViews: d.views,
-      verifiedViews: d.verifiedViews,
-      categories: d.cats,
-      availability: true,
-      verificationStatus: 'verified',
-      reliabilityScore: 90 + Math.floor(Math.random() * 10),
-      completedGigs: Math.floor(Math.random() * 12),
-      successfulGigs: Math.floor(Math.random() * 10),
-    });
+    for (let i = 0; i < influencerData.length; i++) {
+      const d = influencerData[i];
+      const user = await User.create({
+        name: d.name,
+        email: d.email,
+        password: 'Password@123',
+        role: 'influencer',
+        emailVerified: true,
+        accountStatus: 'active',
+        phone: `+23480${10000000 + i}`,
+      });
+      await InfluencerProfile.create({
+        userId: user._id,
+        whatsappNumber: `+23480${10000000 + i}`,
+        state: d.state,
+        city: d.city,
+        lga: d.lga,
+        area: d.area,
+        additionalAreas: [],
+        averageViews: d.views,
+        verifiedViews: d.verifiedViews,
+        categories: d.cats,
+        availability: true,
+        verificationStatus: 'verified',
+        reliabilityScore: 90 + Math.floor(Math.random() * 10),
+        completedGigs: Math.floor(Math.random() * 12),
+        successfulGigs: Math.floor(Math.random() * 10),
+      });
+    }
+    console.log(`✅ Created ${influencerData.length} influencer accounts`);
+
+    // === VENDORS ===
+    const vendorData = [
+      { name: 'Chukwuemeka Johnson', email: 'vendor1@example.com', business: 'ChocoMart Superstore', category: 'Food & Drinks', state: 'Lagos', area: 'Ikeja' },
+      { name: 'Sandra Okonkwo', email: 'vendor2@example.com', business: 'Sandra\'s Boutique', category: 'Fashion', state: 'Lagos', area: 'Lekki' },
+      { name: 'Ahmed Ibrahim', email: 'vendor3@example.com', business: 'Prime Properties NG', category: 'Real Estate', state: 'Abuja', area: 'Maitama' },
+      { name: 'Grace Uche', email: 'vendor4@example.com', business: 'TechHub Academy', category: 'Education & Courses', state: 'Lagos', area: 'Yaba' },
+    ];
+
+    for (let i = 0; i < vendorData.length; i++) {
+      const d = vendorData[i];
+      const user = await User.create({
+        name: d.name,
+        email: d.email,
+        password: 'Password@123',
+        role: 'vendor',
+        emailVerified: true,
+        accountStatus: 'active',
+        phone: `+23481${10000000 + i}`,
+      });
+      await VendorProfile.create({
+        userId: user._id,
+        businessName: d.business,
+        contactPerson: d.name,
+        businessCategory: d.category,
+        description: `${d.business} - Your trusted Nigerian ${d.category.toLowerCase()} provider.`,
+        phone: `+23481${10000000 + i}`,
+        whatsapp: `+23481${10000000 + i}`,
+        state: d.state,
+        area: d.area,
+        verificationStatus: 'verified',
+      });
+    }
+    console.log(`✅ Created ${vendorData.length} vendor accounts`);
+  } else {
+    console.log('ℹ️  Skipped dummy accounts. Only Admin and platform configurations seeded.');
   }
-  console.log(`✅ Created ${influencerData.length} influencer accounts`);
 
-  // === VENDORS ===
-  const vendorData = [
-    { name: 'Chukwuemeka Johnson', email: 'vendor1@example.com', business: 'ChocoMart Superstore', category: 'Food & Drinks', state: 'Lagos', area: 'Ikeja' },
-    { name: 'Sandra Okonkwo', email: 'vendor2@example.com', business: 'Sandra\'s Boutique', category: 'Fashion', state: 'Lagos', area: 'Lekki' },
-    { name: 'Ahmed Ibrahim', email: 'vendor3@example.com', business: 'Prime Properties NG', category: 'Real Estate', state: 'Abuja', area: 'Maitama' },
-    { name: 'Grace Uche', email: 'vendor4@example.com', business: 'TechHub Academy', category: 'Education & Courses', state: 'Lagos', area: 'Yaba' },
-  ];
-
-  for (let i = 0; i < vendorData.length; i++) {
-    const d = vendorData[i];
-    const user = await User.create({
-      name: d.name,
-      email: d.email,
-      password: 'Password@123',
-      role: 'vendor',
-      emailVerified: true,
-      accountStatus: 'active',
-      phone: `+23481${10000000 + i}`,
-    });
-    await VendorProfile.create({
-      userId: user._id,
-      businessName: d.business,
-      contactPerson: d.name,
-      businessCategory: d.category,
-      description: `${d.business} - Your trusted Nigerian ${d.category.toLowerCase()} provider.`,
-      phone: `+23481${10000000 + i}`,
-      whatsapp: `+23481${10000000 + i}`,
-      state: d.state,
-      area: d.area,
-      verificationStatus: 'verified',
-    });
-  }
-  console.log(`✅ Created ${vendorData.length} vendor accounts`);
-
-  console.log('\n🎉 Database seeded successfully!');
+  console.log('\n🎉 Database setup complete!');
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   console.log('Admin Login: admin@mediova.ng / Admin@123456');
-  console.log('Influencer Login: amaka@example.com / Password@123');
-  console.log('Vendor Login: vendor1@example.com / Password@123');
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   process.exit(0);
 };

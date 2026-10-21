@@ -1,7 +1,7 @@
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
-const { uploadMedia, isConfigured } = require('../config/cloudinary');
+const { uploadBuffer, isConfigured } = require('../config/cloudinary');
 
 // Ensure local uploads directory exists for fallback
 const uploadDir = path.join(__dirname, '../uploads');
@@ -9,7 +9,7 @@ if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
 }
 
-// Multer storage
+// Multer storage — keep files in memory so we can stream them to Cloudinary
 const storage = multer.memoryStorage();
 
 // File filter for images and videos
@@ -38,16 +38,18 @@ const upload = multer({
 });
 
 /**
- * Helper to upload buffer to Cloudinary or save locally if Cloudinary is not configured
+ * Helper to upload buffer to Cloudinary via a stream, or save locally
+ * if Cloudinary is not configured.
+ *
+ * Uses stream upload (uploadBuffer) rather than base64 encoding to avoid
+ * the ~33% memory overhead and potential timeout issues on constrained servers.
  */
 const processUploadedFile = async (file, folder = 'general') => {
   if (!file) return null;
 
   if (isConfigured) {
-    // Cloudinary upload via base64 data URI
-    const b64 = Buffer.from(file.buffer).toString('base64');
-    const dataURI = `data:${file.mimetype};base64,${b64}`;
-    return await uploadMedia(dataURI, folder);
+    // Stream the raw buffer to Cloudinary — memory-efficient and faster
+    return await uploadBuffer(file.buffer, folder, file.mimetype);
   } else {
     // Local storage fallback
     const targetFolder = path.join(uploadDir, folder);
