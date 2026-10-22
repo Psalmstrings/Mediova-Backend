@@ -17,6 +17,8 @@ const influencerRoutes = require('./routes/influencers');
 const vendorRoutes = require('./routes/vendors');
 const adminRoutes = require('./routes/admin');
 const notificationRoutes = require('./routes/notifications');
+const complaintRoutes = require('./routes/complaints');
+const supportRoutes = require('./routes/support');
 
 const app = express();
 
@@ -97,6 +99,8 @@ app.use('/api/influencers', influencerRoutes);
 app.use('/api/vendors', vendorRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/notifications', notificationRoutes);
+app.use('/api/complaints', complaintRoutes);
+app.use('/api/support', supportRoutes);
 
 // Health check
 app.get('/api/health', (req, res) => {

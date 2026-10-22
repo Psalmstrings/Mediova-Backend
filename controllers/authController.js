@@ -7,6 +7,7 @@ const Notification = require('../models/Notification');
 const generateToken = require('../utils/generateToken');
 const { sendEmail } = require('../config/email');
 const emailTemplates = require('../utils/emailTemplates');
+const { normalizePhoneNumber, isValidPhoneNumber } = require('../utils/locations');
 
 /**
  * Returns the primary frontend URL for verification and reset links.
@@ -61,6 +62,22 @@ const register = async (req, res, next) => {
       });
     }
 
+    // Backend password complexity validation
+    if (
+      !password ||
+      password.length < 8 ||
+      !/[A-Z]/.test(password) ||
+      !/[a-z]/.test(password) ||
+      !/[0-9]/.test(password) ||
+      !/[!@#$%^&*(),.?":{}|<>]/.test(password)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message:
+          'Password must be at least 8 characters long and contain at least one uppercase letter, one lowercase letter, one number, and one special character.',
+      });
+    }
+
     // Normalize email
     const normalizedEmail = (email || '').trim().toLowerCase();
 
@@ -73,11 +90,15 @@ const register = async (req, res, next) => {
       });
     }
 
+    // Normalize phone numbers to international E.164 standard
+    const normalizedPhone = normalizePhoneNumber(phone);
+    const normalizedWhatsapp = normalizePhoneNumber(whatsappNumber || phone);
+
     // Create base user - immediately active and verified
     const user = await User.create({
       name: (name || '').trim(),
       email: normalizedEmail,
-      phone: (phone || '').trim(),
+      phone: normalizedPhone,
       password,
       role,
       emailVerified: true,
@@ -89,7 +110,7 @@ const register = async (req, res, next) => {
     if (role === 'influencer') {
       profile = await InfluencerProfile.create({
         userId: user._id,
-        whatsappNumber: whatsappNumber || phone || '',
+        whatsappNumber: normalizedWhatsapp,
         state: state || 'Lagos',
         city: city || '',
         lga: lga || '',
@@ -106,8 +127,8 @@ const register = async (req, res, next) => {
         contactPerson: contactPerson || name,
         businessCategory: businessCategory || 'General Advertising',
         description: description || '',
-        phone: phone || '',
-        whatsapp: whatsappNumber || phone || '',
+        phone: normalizedPhone,
+        whatsapp: normalizedWhatsapp,
         state: state || 'Lagos',
         city: city || '',
         lga: lga || '',
@@ -351,16 +372,58 @@ const getMe = async (req, res, next) => {
 };
 
 /**
- * @desc    Forgot Password
+ * @desc    Forgot Password - initiates secure single-use token recovery
  * @route   POST /api/auth/forgot-password
  * @access  Public
  */
 const forgotPassword = async (req, res, next) => {
   try {
     const { email } = req.body;
-    return res.status(400).json({
-      success: false,
-      message: 'Automated email password reset is no longer available as email notifications are restricted to gig assignments. Please contact MEDIOVA support or your platform administrator on WhatsApp to reset your password.',
+
+    if (!email) {
+      return res.status(400).json({
+        success: false,
+        message: 'Please provide your account email address.',
+      });
+    }
+
+    const normalizedEmail = String(email).trim().toLowerCase();
+    const user = await User.findOne({ email: normalizedEmail });
+
+    // Always proceed with a generic response to prevent account enumeration
+    if (user) {
+      // Invalidate any existing reset tokens
+      await VerificationToken.deleteMany({ userId: user._id, type: 'password_reset' });
+
+      // Generate cryptographically secure 32-byte hex token
+      const rawToken = crypto.randomBytes(32).toString('hex');
+
+      await VerificationToken.create({
+        userId: user._id,
+        token: rawToken,
+        type: 'password_reset',
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000), // 1 hour expiry
+      });
+
+      const clientUrl = getClientUrl();
+      const resetUrl = `${clientUrl}/reset-password?token=${rawToken}`;
+      const emailContent = emailTemplates.passwordReset({
+        name: user.name,
+        resetUrl,
+      });
+
+      await sendEmail({
+        to: user.email,
+        subject: emailContent.subject,
+        html: emailContent.html,
+        text: emailContent.text,
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message:
+        'If an account with that email address exists in our system, you will receive password reset instructions shortly.',
     });
   } catch (error) {
     next(error);
@@ -368,7 +431,7 @@ const forgotPassword = async (req, res, next) => {
 };
 
 /**
- * @desc    Reset Password
+ * @desc    Reset Password with token & complexity verification
  * @route   POST /api/auth/reset-password
  * @access  Public
  */
@@ -379,12 +442,27 @@ const resetPassword = async (req, res, next) => {
     if (!token || !password) {
       return res.status(400).json({
         success: false,
-        message: 'Token and new password are required.',
+        message: 'Reset token and new password are required.',
+      });
+    }
+
+    // Backend password complexity enforcement
+    if (
+      password.length < 8 ||
+      !/[A-Z]/.test(password) ||
+      !/[a-z]/.test(password) ||
+      !/[0-9]/.test(password) ||
+      !/[!@#$%^&*(),.?":{}|<>]/.test(password)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message:
+          'New password must be at least 8 characters long and contain at least one uppercase letter, one lowercase letter, one number, and one special character.',
       });
     }
 
     const resetToken = await VerificationToken.findOne({
-      token,
+      token: String(token).trim(),
       type: 'password_reset',
       expiresAt: { $gt: Date.now() },
     });
@@ -392,23 +470,24 @@ const resetPassword = async (req, res, next) => {
     if (!resetToken) {
       return res.status(400).json({
         success: false,
-        message: 'Invalid or expired password reset link.',
+        message: 'Invalid or expired password reset link. Please request a new one.',
       });
     }
 
     const user = await User.findById(resetToken.userId);
     if (!user) {
-      return res.status(404).json({ success: false, message: 'User not found.' });
+      return res.status(404).json({ success: false, message: 'User account not found.' });
     }
 
     user.password = password;
     await user.save();
 
-    await VerificationToken.findByIdAndDelete(resetToken._id);
+    // Single-use token invalidation
+    await VerificationToken.deleteMany({ userId: user._id, type: 'password_reset' });
 
     res.status(200).json({
       success: true,
-      message: 'Password reset successfully! You can now log in.',
+      message: 'Password reset successfully! You can now log in with your new credentials.',
     });
   } catch (error) {
     next(error);

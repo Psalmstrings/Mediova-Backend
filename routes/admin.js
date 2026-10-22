@@ -33,6 +33,13 @@ const {
   getSettings,
   updateSettings,
   testEmailService,
+  getAllRefunds,
+  updateRefundStatus,
+  getAllComplaints,
+  getComplaintById,
+  updateComplaint,
+  getAllSupportTickets,
+  updateSupportTicket,
 } = require('../controllers/adminController');
 
 router.use(protect, authorize('admin'));
@@ -89,5 +96,18 @@ router.delete('/packages/:id', deletePackage);
 // Settings
 router.get('/settings', getSettings);
 router.put('/settings', updateSettings);
+
+// Refunds Management
+router.get('/refunds', getAllRefunds);
+router.patch('/refunds/:id', updateRefundStatus);
+
+// Complaints Management
+router.get('/complaints', getAllComplaints);
+router.get('/complaints/:id', getComplaintById);
+router.patch('/complaints/:id', updateComplaint);
+
+// Support Tickets Management
+router.get('/support-tickets', getAllSupportTickets);
+router.patch('/support-tickets/:id', updateSupportTicket);
 
 module.exports = router;

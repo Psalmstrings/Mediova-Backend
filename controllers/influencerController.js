@@ -123,22 +123,47 @@ const updateBankDetails = async (req, res, next) => {
       });
     }
 
+    const cleanAccountNum = String(accountNumber).replace(/[^0-9]/g, '');
+    if (cleanAccountNum.length !== 10) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid account number. Nigerian NUBAN accounts must be exactly 10 digits.',
+      });
+    }
+
     const profile = await InfluencerProfile.findOne({ userId: req.user._id });
     if (!profile) {
       return res.status(404).json({ success: false, message: 'Profile not found' });
     }
 
     profile.bankDetails = {
-      accountName,
-      bankName,
-      accountNumber,
+      accountName: accountName.trim(),
+      bankName: bankName.trim(),
+      accountNumber: cleanAccountNum,
     };
+    profile.payoutStatus = 'verified';
+
+    if (!profile.payoutAuditLog) {
+      profile.payoutAuditLog = [];
+    }
+    profile.payoutAuditLog.push({
+      action: 'bank_details_updated',
+      timestamp: new Date(),
+      note: `Bank updated to ${bankName} (${cleanAccountNum.slice(-4)})`,
+    });
+
     await profile.save();
 
     res.status(200).json({
       success: true,
       message: 'Bank details saved securely',
-      bankDetails: profile.bankDetails,
+      payoutStatus: profile.payoutStatus,
+      bankDetails: {
+        accountName: profile.bankDetails.accountName,
+        bankName: profile.bankDetails.bankName,
+        accountNumber: `•••• •••• ${cleanAccountNum.slice(-4)}`,
+        rawAccountNumber: cleanAccountNum,
+      },
     });
   } catch (error) {
     next(error);
@@ -435,6 +460,18 @@ const getMyEarnings = async (req, res, next) => {
       .filter((t) => t.status === 'approved')
       .reduce((acc, curr) => acc + curr.amount, 0);
 
+    // Profile payout status
+    const profile = await InfluencerProfile.findOne({ userId: req.user._id });
+    const hasBank = Boolean(profile?.bankDetails?.accountNumber);
+    let calculatedStatus = profile?.payoutStatus || (hasBank ? 'verified' : 'not_configured');
+    if (hasBank && availableBalance > 0) {
+      calculatedStatus = 'eligible_for_payout';
+    }
+
+    const maskedAccount = profile?.bankDetails?.accountNumber
+      ? `•••• •••• ${profile.bankDetails.accountNumber.slice(-4)}`
+      : '';
+
     res.status(200).json({
       success: true,
       summary: {
@@ -442,6 +479,22 @@ const getMyEarnings = async (req, res, next) => {
         pendingEarnings,
         paidEarnings,
         availableBalance,
+      },
+      payoutSetup: {
+        status: calculatedStatus,
+        method: profile?.payoutMethod || 'bank_transfer',
+        bankDetails: {
+          accountName: profile?.bankDetails?.accountName || '',
+          bankName: profile?.bankDetails?.bankName || '',
+          accountNumber: maskedAccount,
+        },
+        eligibilityRules: {
+          qualifyingActivities: 'Approved WhatsApp Status gig verification by Admin broker',
+          verificationRequirement: 'Status view screenshots submitted within gig duration',
+          processingTimeline: '24 to 48 business hours following gig proof approval',
+          feesAndDeductions: '0% platform deductions (100% of agreed reward disbursed)',
+          minimumPayout: 0,
+        },
       },
       transactions,
     });

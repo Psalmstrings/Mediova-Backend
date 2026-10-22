@@ -6,6 +6,7 @@ const Notification = require('../models/Notification');
 const Category = require('../models/Category');
 const ReachPackage = require('../models/ReachPackage');
 const AdminSettings = require('../models/AdminSettings');
+const RefundRequest = require('../models/RefundRequest');
 const { sendEmail } = require('../config/email');
 const emailTemplates = require('../utils/emailTemplates');
 const { processUploadedFile } = require('../middleware/upload');
@@ -122,11 +123,80 @@ const createCampaign = async (req, res, next) => {
       });
     }
 
-    if (!targetLocation || !targetLocation.state || !targetLocation.area) {
-      return res.status(400).json({
-        success: false,
-        message: 'Target location (State and Area) is required.',
-      });
+    // Parse targetLocation from JSON string, object, or multipart bracket notation
+    let parsedLocation = {};
+    if (typeof targetLocation === 'string') {
+      try {
+        parsedLocation = JSON.parse(targetLocation);
+      } catch {
+        parsedLocation = { state: targetLocation };
+      }
+    } else if (targetLocation && typeof targetLocation === 'object') {
+      parsedLocation = targetLocation;
+    } else {
+      parsedLocation = {
+        state: req.body['targetLocation[state]'] || req.body.state || '',
+        targetStates: req.body['targetLocation[targetStates]'] || req.body.targetStates || [],
+        isNationwide:
+          req.body['targetLocation[isNationwide]'] === true ||
+          req.body['targetLocation[isNationwide]'] === 'true' ||
+          req.body.isNationwide === true ||
+          req.body.isNationwide === 'true',
+        city: req.body['targetLocation[city]'] || req.body.city || '',
+        lga: req.body['targetLocation[lga]'] || req.body.lga || '',
+        area: req.body['targetLocation[area]'] || req.body.area || 'General',
+        businessAddress: req.body['targetLocation[businessAddress]'] || req.body.businessAddress || '',
+      };
+    }
+
+    // Normalize targetStates array if sent as string or array
+    if (typeof parsedLocation.targetStates === 'string') {
+      try {
+        parsedLocation.targetStates = JSON.parse(parsedLocation.targetStates);
+      } catch {
+        parsedLocation.targetStates = parsedLocation.targetStates
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean);
+      }
+    }
+
+    if (!Array.isArray(parsedLocation.targetStates)) {
+      parsedLocation.targetStates = parsedLocation.state ? [parsedLocation.state] : [];
+    }
+
+    if (parsedLocation.isNationwide) {
+      parsedLocation.targetStates = ['Nationwide'];
+      parsedLocation.state = 'Nationwide';
+    } else if (parsedLocation.targetStates.length > 0) {
+      parsedLocation.state = parsedLocation.state || parsedLocation.targetStates[0];
+    } else if (parsedLocation.state) {
+      parsedLocation.targetStates = [parsedLocation.state];
+    } else {
+      parsedLocation.state = 'Lagos';
+      parsedLocation.targetStates = ['Lagos'];
+    }
+
+    parsedLocation.area = parsedLocation.area || 'General';
+
+    // Parse callToAction
+    let parsedCta = { actionType: 'WhatsApp', targetValue: '' };
+    if (typeof callToAction === 'string') {
+      try {
+        parsedCta = JSON.parse(callToAction);
+      } catch {
+        parsedCta = { actionType: 'WhatsApp', targetValue: callToAction };
+      }
+    } else if (callToAction && typeof callToAction === 'object') {
+      parsedCta = {
+        actionType: callToAction.actionType || 'WhatsApp',
+        targetValue: callToAction.targetValue || '',
+      };
+    } else if (req.body['callToAction[actionType]'] || req.body['callToAction[targetValue]']) {
+      parsedCta = {
+        actionType: req.body['callToAction[actionType]'] || 'WhatsApp',
+        targetValue: req.body['callToAction[targetValue]'] || '',
+      };
     }
 
     if (!requiredViews || Number(requiredViews) < 1000) {
@@ -161,19 +231,21 @@ const createCampaign = async (req, res, next) => {
     const campaign = await Campaign.create({
       orderNumber,
       vendorId: req.user._id,
-      title,
-      description,
-      category,
-      objective,
+      title: title.trim(),
+      description: description.trim(),
+      category: category.trim(),
+      objective: objective.trim(),
       media: mediaData,
       adCopy: adCopy || '',
-      callToAction: callToAction || { actionType: 'WhatsApp', targetValue: '' },
+      callToAction: parsedCta,
       targetLocation: {
-        state: targetLocation.state,
-        city: targetLocation.city || '',
-        lga: targetLocation.lga || '',
-        area: targetLocation.area,
-        businessAddress: targetLocation.businessAddress || '',
+        state: parsedLocation.state,
+        targetStates: parsedLocation.targetStates,
+        isNationwide: Boolean(parsedLocation.isNationwide),
+        city: parsedLocation.city || '',
+        lga: parsedLocation.lga || '',
+        area: parsedLocation.area || 'General',
+        businessAddress: parsedLocation.businessAddress || '',
       },
       targetRadius: targetRadius || '',
       reachPackageId: reachPackageId || null,
@@ -333,6 +405,148 @@ const getOrderOptions = async (req, res, next) => {
   }
 };
 
+/**
+ * @desc    Submit a refund request for an eligible paid campaign
+ * @route   POST /api/vendors/refunds
+ * @access  Private (Vendor)
+ */
+const submitRefundRequest = async (req, res, next) => {
+  try {
+    const { campaignId, reason, description, bankDetails } = req.body;
+
+    if (!campaignId || !reason || !description) {
+      return res.status(400).json({
+        success: false,
+        message: 'Campaign ID, refund reason, and detailed explanation are required.',
+      });
+    }
+
+    if (
+      !bankDetails ||
+      !bankDetails.accountName ||
+      !bankDetails.bankName ||
+      !bankDetails.accountNumber
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: 'Complete bank account details (Name, Bank, 10-digit NUBAN) are required for refund transfer.',
+      });
+    }
+
+    // Clean and validate 10-digit Nigerian NUBAN
+    const cleanAccountNum = String(bankDetails.accountNumber).replace(/[^0-9]/g, '');
+    if (cleanAccountNum.length !== 10) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid account number. Nigerian NUBAN accounts must be exactly 10 digits.',
+      });
+    }
+
+    const campaign = await Campaign.findOne({ _id: campaignId, vendorId: req.user._id });
+    if (!campaign) {
+      return res.status(404).json({
+        success: false,
+        message: 'Campaign not found or does not belong to your account.',
+      });
+    }
+
+    if (campaign.paymentStatus !== 'confirmed') {
+      return res.status(400).json({
+        success: false,
+        message: 'Refunds can only be requested for campaigns with confirmed payment.',
+      });
+    }
+
+    if (campaign.status === 'Completed') {
+      return res.status(400).json({
+        success: false,
+        message: 'This campaign has already completed its reach delivery. For disputed results, please submit a formal complaint instead.',
+      });
+    }
+
+    // Check if an existing refund request is already active
+    const existingRefund = await RefundRequest.findOne({
+      campaignId: campaign._id,
+      status: { $in: ['Requested', 'Under Review', 'Approved', 'Processing', 'Refunded'] },
+    });
+
+    if (existingRefund) {
+      return res.status(400).json({
+        success: false,
+        message: `A refund request (#${existingRefund.refundNumber}) has already been submitted for this campaign (Status: ${existingRefund.status}).`,
+      });
+    }
+
+    const refundNumber = `REF-${Date.now().toString(36).toUpperCase()}-${Math.random().toString(36).substring(2, 5).toUpperCase()}`;
+
+    const refund = await RefundRequest.create({
+      refundNumber,
+      campaignId: campaign._id,
+      vendorId: req.user._id,
+      orderNumber: campaign.orderNumber,
+      amount: campaign.price,
+      reason,
+      description: description.trim(),
+      bankDetails: {
+        accountName: bankDetails.accountName.trim(),
+        bankName: bankDetails.bankName.trim(),
+        accountNumber: cleanAccountNum,
+      },
+      status: 'Requested',
+    });
+
+    // Notify vendor
+    await Notification.create({
+      userId: req.user._id,
+      title: 'Refund Request Received',
+      message: `Your refund request #${refundNumber} for order #${campaign.orderNumber} (₦${Number(campaign.price).toLocaleString()}) has been received and is under administrative review.`,
+      type: 'info',
+      link: `/vendor/orders/${campaign._id}`,
+    });
+
+    // Notify admins
+    const admins = await User.find({ role: 'admin' });
+    for (const admin of admins) {
+      await Notification.create({
+        userId: admin._id,
+        title: 'New Refund Request Submitted',
+        message: `Refund #${refundNumber} submitted by ${req.user.name} for campaign "${campaign.title}" (₦${Number(campaign.price).toLocaleString()}).`,
+        type: 'payment',
+        link: `/admin/orders/${campaign._id}`,
+      });
+    }
+
+    res.status(201).json({
+      success: true,
+      message: 'Refund request submitted successfully. It will be reviewed by our finance team within 3-5 business days.',
+      refund,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * @desc    Get all refund requests for logged-in vendor
+ * @route   GET /api/vendors/refunds
+ * @access  Private (Vendor)
+ */
+const getMyRefundRequests = async (req, res, next) => {
+  try {
+    const refunds = await RefundRequest.find({ vendorId: req.user._id })
+      .populate('campaignId', 'title orderNumber price status paymentStatus')
+      .sort({ createdAt: -1 });
+
+    res.status(200).json({
+      success: true,
+      count: refunds.length,
+      refunds,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   getMyProfile,
   updateProfile,
@@ -340,4 +554,6 @@ module.exports = {
   getMyCampaigns,
   getCampaignDetails,
   getOrderOptions,
+  submitRefundRequest,
+  getMyRefundRequests,
 };

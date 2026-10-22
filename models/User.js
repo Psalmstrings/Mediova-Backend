@@ -26,7 +26,22 @@ const userSchema = new mongoose.Schema(
     password: {
       type: String,
       required: [true, 'Please provide a password'],
-      minlength: [6, 'Password must be at least 6 characters'],
+      validate: {
+        validator: function (val) {
+          // If already hashed (bcrypt hash length is 60), pass validation
+          if (val && val.length === 60 && val.startsWith('$2')) return true;
+          return (
+            val &&
+            val.length >= 8 &&
+            /[A-Z]/.test(val) &&
+            /[a-z]/.test(val) &&
+            /[0-9]/.test(val) &&
+            /[!@#$%^&*(),.?":{}|<>]/.test(val)
+          );
+        },
+        message:
+          'Password must be at least 8 characters and include uppercase, lowercase, number, and special character.',
+      },
       select: false,
     },
     role: {
@@ -46,6 +61,14 @@ const userSchema = new mongoose.Schema(
     profileImage: {
       type: String,
       default: '',
+    },
+    resetPasswordToken: {
+      type: String,
+      select: false,
+    },
+    resetPasswordExpires: {
+      type: Date,
+      select: false,
     },
   },
   {

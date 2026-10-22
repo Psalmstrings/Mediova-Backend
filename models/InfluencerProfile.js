@@ -75,6 +75,31 @@ const influencerProfileSchema = new mongoose.Schema(
       bankName: { type: String, default: '', trim: true },
       accountNumber: { type: String, default: '', trim: true },
     },
+    payoutStatus: {
+      type: String,
+      enum: [
+        'not_configured',
+        'pending_verification',
+        'verified',
+        'eligible_for_payout',
+        'processing',
+        'paid',
+        'failed',
+        'on_hold',
+      ],
+      default: 'not_configured',
+    },
+    payoutMethod: {
+      type: String,
+      default: 'bank_transfer',
+    },
+    payoutAuditLog: [
+      {
+        action: { type: String, default: 'update' },
+        timestamp: { type: Date, default: Date.now },
+        note: { type: String, default: '' },
+      },
+    ],
     proofImages: [
       {
         url: { type: String, required: true },

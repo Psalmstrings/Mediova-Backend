@@ -9,6 +9,9 @@ const Notification = require('../models/Notification');
 const Category = require('../models/Category');
 const ReachPackage = require('../models/ReachPackage');
 const AdminSettings = require('../models/AdminSettings');
+const RefundRequest = require('../models/RefundRequest');
+const Complaint = require('../models/Complaint');
+const SupportTicket = require('../models/SupportTicket');
 const { sendEmail } = require('../config/email');
 const emailTemplates = require('../utils/emailTemplates');
 
@@ -704,13 +707,52 @@ const getGigById = async (req, res, next) => {
 // ============================
 const matchInfluencers = async (req, res, next) => {
   try {
-    const { state, city, lga, area, category, minViews, maxViews, availability, excludeCampaignId } = req.query;
+    const {
+      state,
+      states,
+      isNationwide,
+      city,
+      lga,
+      area,
+      category,
+      minViews,
+      maxViews,
+      availability,
+      excludeCampaignId,
+    } = req.query;
 
     const profileQuery = { verificationStatus: 'verified' };
-    if (state) profileQuery.state = { $regex: state, $options: 'i' };
+
+    // Support multi-state and nationwide targeting
+    const isAllNation =
+      isNationwide === 'true' ||
+      isNationwide === true ||
+      state === 'Nationwide' ||
+      states === 'Nationwide';
+
+    if (!isAllNation) {
+      let targetStateList = [];
+      if (states) {
+        targetStateList =
+          typeof states === 'string'
+            ? states.split(',').map((s) => s.trim()).filter(Boolean)
+            : states;
+      } else if (state && state !== 'all') {
+        targetStateList = [state];
+      }
+
+      if (targetStateList.length === 1) {
+        profileQuery.state = { $regex: targetStateList[0], $options: 'i' };
+      } else if (targetStateList.length > 1) {
+        profileQuery.state = {
+          $in: targetStateList.map((s) => new RegExp(`^${s}$`, 'i')),
+        };
+      }
+    }
+
     if (city) profileQuery.city = { $regex: city, $options: 'i' };
     if (lga) profileQuery.lga = { $regex: lga, $options: 'i' };
-    if (area) {
+    if (area && !isAllNation) {
       profileQuery.$or = [
         { area: { $regex: area, $options: 'i' } },
         { additionalAreas: { $regex: area, $options: 'i' } },
@@ -961,6 +1003,240 @@ const testEmailService = async (req, res, next) => {
   }
 };
 
+// ============================
+// REFUND MANAGEMENT
+// ============================
+const getAllRefunds = async (req, res, next) => {
+  try {
+    const { status, page = 1, limit = 20 } = req.query;
+    const query = {};
+    if (status && status !== 'all') query.status = status;
+
+    const skip = (Number(page) - 1) * Number(limit);
+    const total = await RefundRequest.countDocuments(query);
+    const refunds = await RefundRequest.find(query)
+      .populate('vendorId', 'name email phone')
+      .populate('campaignId', 'title orderNumber price status paymentStatus')
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(Number(limit));
+
+    res.status(200).json({
+      success: true,
+      total,
+      pages: Math.ceil(total / Number(limit)),
+      page: Number(page),
+      refunds,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+const updateRefundStatus = async (req, res, next) => {
+  try {
+    const { status, adminNotes, rejectionReason, transferReference } = req.body;
+    const refund = await RefundRequest.findById(req.params.id)
+      .populate('vendorId', 'name email')
+      .populate('campaignId');
+
+    if (!refund) {
+      return res.status(404).json({ success: false, message: 'Refund request not found.' });
+    }
+
+    if (status) refund.status = status;
+    if (adminNotes !== undefined) refund.adminNotes = adminNotes;
+    if (rejectionReason !== undefined) refund.rejectionReason = rejectionReason;
+    if (transferReference) refund.transferReference = transferReference;
+
+    refund.processedBy = req.user._id;
+    refund.processedAt = new Date();
+
+    // If marked Refunded, ensure campaign status is safely synced and transfer reference is recorded
+    if (status === 'Refunded') {
+      if (!transferReference) {
+        return res.status(400).json({
+          success: false,
+          message: 'A legitimate bank transfer reference number is required to mark a refund as completed.',
+        });
+      }
+      await Campaign.findByIdAndUpdate(refund.campaignId._id, {
+        paymentStatus: 'refunded',
+        status: 'Cancelled',
+      });
+    }
+
+    await refund.save();
+
+    // In-app notification to vendor
+    await Notification.create({
+      userId: refund.vendorId._id,
+      title: `Refund Request ${status}`,
+      message: `Your refund request #${refund.refundNumber} for order #${refund.orderNumber} has been updated to "${status}".${transferReference ? ` Ref: ${transferReference}` : ''}`,
+      type: status === 'Refunded' ? 'payment' : 'info',
+      link: `/vendor/orders/${refund.campaignId._id}`,
+    });
+
+    res.status(200).json({
+      success: true,
+      message: `Refund status updated to ${status}`,
+      refund,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// ============================
+// COMPLAINTS & APPEALS MANAGEMENT
+// ============================
+const getAllComplaints = async (req, res, next) => {
+  try {
+    const { status, category, userRole, page = 1, limit = 20 } = req.query;
+    const query = {};
+    if (status && status !== 'all') query.status = status;
+    if (category) query.category = category;
+    if (userRole) query.userRole = userRole;
+
+    const skip = (Number(page) - 1) * Number(limit);
+    const total = await Complaint.countDocuments(query);
+    const complaints = await Complaint.find(query)
+      .populate('userId', 'name email phone role')
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(Number(limit));
+
+    res.status(200).json({
+      success: true,
+      total,
+      pages: Math.ceil(total / Number(limit)),
+      page: Number(page),
+      complaints,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+const getComplaintById = async (req, res, next) => {
+  try {
+    const complaint = await Complaint.findById(req.params.id).populate(
+      'userId',
+      'name email phone role'
+    );
+    if (!complaint) {
+      return res.status(404).json({ success: false, message: 'Complaint record not found.' });
+    }
+    res.status(200).json({ success: true, complaint });
+  } catch (error) {
+    next(error);
+  }
+};
+
+const updateComplaint = async (req, res, next) => {
+  try {
+    const { status, internalInvestigationNotes, resolutionSummary } = req.body;
+    const complaint = await Complaint.findById(req.params.id);
+    if (!complaint) {
+      return res.status(404).json({ success: false, message: 'Complaint not found.' });
+    }
+
+    if (status) complaint.status = status;
+    if (internalInvestigationNotes !== undefined)
+      complaint.internalInvestigationNotes = internalInvestigationNotes;
+    if (resolutionSummary !== undefined)
+      complaint.resolutionSummary = resolutionSummary;
+
+    if (status === 'Resolved' || status === 'Closed') {
+      complaint.resolvedAt = new Date();
+    }
+
+    await complaint.save();
+
+    // Notify user
+    await Notification.create({
+      userId: complaint.userId,
+      title: `Complaint Status: ${status}`,
+      message: `Your complaint #${complaint.complaintNumber} ("${complaint.subject}") has been updated to ${status}.${resolutionSummary ? ` Resolution: ${resolutionSummary}` : ''}`,
+      type: status === 'Resolved' ? 'success' : 'info',
+    });
+
+    res.status(200).json({
+      success: true,
+      message: 'Complaint updated successfully.',
+      complaint,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// ============================
+// SUPPORT TICKETS MANAGEMENT
+// ============================
+const getAllSupportTickets = async (req, res, next) => {
+  try {
+    const { status, category, page = 1, limit = 20 } = req.query;
+    const query = {};
+    if (status && status !== 'all') query.status = status;
+    if (category) query.category = category;
+
+    const skip = (Number(page) - 1) * Number(limit);
+    const total = await SupportTicket.countDocuments(query);
+    const tickets = await SupportTicket.find(query)
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(Number(limit));
+
+    res.status(200).json({
+      success: true,
+      total,
+      pages: Math.ceil(total / Number(limit)),
+      page: Number(page),
+      tickets,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+const updateSupportTicket = async (req, res, next) => {
+  try {
+    const { status, adminReply } = req.body;
+    const ticket = await SupportTicket.findById(req.params.id);
+    if (!ticket) {
+      return res.status(404).json({ success: false, message: 'Support ticket not found.' });
+    }
+
+    if (status) ticket.status = status;
+    if (adminReply !== undefined) {
+      ticket.adminReply = adminReply;
+      ticket.repliedAt = new Date();
+      ticket.assignedTo = req.user._id;
+    }
+
+    await ticket.save();
+
+    // If ticket was from a logged-in user, send in-app notification
+    if (ticket.userId) {
+      await Notification.create({
+        userId: ticket.userId,
+        title: `Support Ticket Response (${ticket.ticketNumber})`,
+        message: adminReply || `Your support ticket #${ticket.ticketNumber} is now ${status}.`,
+        type: 'info',
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: 'Support ticket updated.',
+      ticket,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   getDashboardStats,
   getAllUsers,
@@ -993,4 +1269,11 @@ module.exports = {
   getSettings,
   updateSettings,
   testEmailService,
+  getAllRefunds,
+  updateRefundStatus,
+  getAllComplaints,
+  getComplaintById,
+  updateComplaint,
+  getAllSupportTickets,
+  updateSupportTicket,
 };

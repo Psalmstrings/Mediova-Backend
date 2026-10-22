@@ -56,12 +56,16 @@ const campaignSchema = new mongoose.Schema(
       },
     },
     targetLocation: {
-      state: { type: String, required: true },
+      state: { type: String, default: '' },
+      targetStates: { type: [String], default: [] },
+      isNationwide: { type: Boolean, default: false },
       city: { type: String, default: '' },
       lga: { type: String, default: '' },
-      area: { type: String, required: true },
+      area: { type: String, default: 'General' },
       businessAddress: { type: String, default: '' },
     },
+    targetStates: { type: [String], default: [] },
+    isNationwide: { type: Boolean, default: false },
     targetRadius: {
       type: String,
       default: '',
