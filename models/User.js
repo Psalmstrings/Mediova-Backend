@@ -93,6 +93,13 @@ const userSchema = new mongoose.Schema(
       enum: ['influencer', 'vendor', 'admin'],
       default: 'influencer',
     },
+    roles: {
+      type: [String],
+      enum: ['influencer', 'vendor', 'admin'],
+      default: function () {
+        return this.role ? [this.role] : ['influencer'];
+      },
+    },
     emailVerified: {
       type: Boolean,
       default: true,
