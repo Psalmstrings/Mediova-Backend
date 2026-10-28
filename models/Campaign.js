@@ -38,6 +38,13 @@ const campaignSchema = new mongoose.Schema(
       publicId: { type: String, default: '' },
       type: { type: String, enum: ['image', 'video', 'flyer'], default: 'image' },
     },
+    mediaList: [
+      {
+        url: { type: String, default: '' },
+        publicId: { type: String, default: '' },
+        type: { type: String, enum: ['image', 'video', 'flyer'], default: 'image' },
+      },
+    ],
     adCopy: {
       type: String,
       default: '',
@@ -54,6 +61,25 @@ const campaignSchema = new mongoose.Schema(
         default: '',
         trim: true,
       },
+    },
+    targetCountry: {
+      type: String,
+      default: 'Nigeria',
+      trim: true,
+    },
+    targetCountryCode: {
+      type: String,
+      default: 'NG',
+      trim: true,
+    },
+    targetRegion: {
+      type: String,
+      default: 'Lagos',
+      trim: true,
+    },
+    targetAreas: {
+      type: [String],
+      default: [],
     },
     targetLocation: {
       state: { type: String, default: '' },
@@ -87,6 +113,10 @@ const campaignSchema = new mongoose.Schema(
       type: Number,
       required: [true, 'Price is required'],
     },
+    currency: {
+      type: String,
+      default: 'NGN',
+    },
     duration: {
       type: String,
       required: [true, 'Duration is required'],
@@ -102,12 +132,18 @@ const campaignSchema = new mongoose.Schema(
       type: String,
       default: '',
     },
+    paymentReceipt: {
+      url: { type: String, default: '' },
+      publicId: { type: String, default: '' },
+      uploadedAt: { type: Date },
+    },
     status: {
       type: String,
       enum: [
         'Draft',
         'Submitted',
         'Awaiting Payment',
+        'Payment Submitted',
         'Payment Confirmed',
         'Under Review',
         'Approved',
@@ -115,16 +151,54 @@ const campaignSchema = new mongoose.Schema(
         'Influencers Assigned',
         'Active',
         'Awaiting Proof',
+        'Submitted for Vendor Review',
         'Completed',
+        'Issue Raised',
         'Rejected',
         'Cancelled',
       ],
-      default: 'Awaiting Payment',
+      default: 'Submitted',
     },
     paymentStatus: {
       type: String,
-      enum: ['unpaid', 'confirmed', 'refunded'],
+      enum: ['unpaid', 'submitted', 'confirmed', 'rejected', 'refunded'],
       default: 'unpaid',
+    },
+    paymentReview: {
+      reviewedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+      reviewedAt: { type: Date },
+      decision: { type: String, default: '' },
+      rejectionReason: { type: String, default: '' },
+    },
+    completedWork: {
+      summary: { type: String, default: '' },
+      notes: { type: String, default: '' },
+      evidenceUrls: [
+        {
+          url: { type: String, default: '' },
+          caption: { type: String, default: '' },
+          publicId: { type: String, default: '' },
+          mediaType: { type: String, default: 'video' },
+          uploadedAt: { type: Date, default: Date.now },
+        },
+      ],
+      submittedAt: { type: Date },
+      submittedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+      vendorReviewStatus: {
+        type: String,
+        enum: ['none', 'submitted', 'accepted', 'issue_raised'],
+        default: 'none',
+      },
+      vendorReviewComment: { type: String, default: '' },
+      vendorReviewedAt: { type: Date },
+      history: [
+        {
+          action: { type: String, default: 'admin_submitted' },
+          notes: { type: String, default: '' },
+          timestamp: { type: Date, default: Date.now },
+          by: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+        },
+      ],
     },
     assignedReach: {
       type: Number,

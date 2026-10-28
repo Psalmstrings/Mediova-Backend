@@ -18,12 +18,25 @@ const gigSubmissionSchema = new mongoose.Schema(
       ref: 'User',
       required: true,
     },
+    videoUrl: {
+      type: String,
+      default: '',
+    },
+    videoPublicId: {
+      type: String,
+      default: '',
+    },
+    mediaType: {
+      type: String,
+      enum: ['video', 'image'],
+      default: 'video',
+    },
     proofImages: [
       {
         url: { type: String, required: true },
         publicId: { type: String, default: '' },
         caption: { type: String, default: '' },
-        type: { type: String, enum: ['status_post', 'status_views', 'additional'], default: 'status_post' },
+        type: { type: String, enum: ['status_post', 'status_views', 'additional', 'video'], default: 'status_post' },
         uploadedAt: { type: Date, default: Date.now },
       },
     ],
@@ -47,6 +60,10 @@ const gigSubmissionSchema = new mongoose.Schema(
     },
     reviewedAt: {
       type: Date,
+    },
+    reviewedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
     },
   },
   {

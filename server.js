@@ -26,7 +26,12 @@ const app = express();
 connectDB();
 
 // Security headers
-app.use(helmet({ crossOriginEmbedderPolicy: false }));
+app.use(
+  helmet({
+    crossOriginEmbedderPolicy: false,
+    crossOriginResourcePolicy: { policy: 'cross-origin' },
+  })
+);
 
 // CORS
 const allowedOrigins = [
@@ -90,8 +95,19 @@ app.use('/api/auth/login', authLimiter);
 app.use('/api/auth/register', authLimiter);
 app.use('/api/auth/forgot-password', authLimiter);
 
-// Static uploads (local fallback)
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+// Static uploads (local fallback with cross-origin resource sharing)
+app.use(
+  '/uploads',
+  (req, res, next) => {
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', '*');
+    if (req.method === 'OPTIONS') return res.sendStatus(204);
+    next();
+  },
+  express.static(path.join(__dirname, 'uploads'))
+);
 
 // API Routes
 app.use('/api/auth', authRoutes);

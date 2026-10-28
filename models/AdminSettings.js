@@ -8,7 +8,7 @@ const adminSettingsSchema = new mongoose.Schema(
     },
     platformTagline: {
       type: String,
-      default: 'Turn WhatsApp Status views into income. Reach real people through trusted WhatsApp audiences.',
+      default: 'Connect global brands with trusted WhatsApp Status creators worldwide.',
     },
     logo: {
       type: String,
@@ -16,7 +16,7 @@ const adminSettingsSchema = new mongoose.Schema(
     },
     supportEmail: {
       type: String,
-      default: 'support@mediova.ng',
+      default: 'support@mediova.com',
     },
     supportPhone: {
       type: String,
@@ -28,20 +28,29 @@ const adminSettingsSchema = new mongoose.Schema(
     },
     businessAddress: {
       type: String,
-      default: 'Victoria Island, Lagos, Nigeria',
+      default: 'Global Operations Headquarters & Regional Hubs',
     },
     defaultWhatsAppMessage: {
       type: String,
-      default: 'Hello MEDIOVA Team, I have submitted advertising order #{ORDER_NUMBER} for "{TITLE}" and would like to complete payment.',
+      default: 'Hello MEDIOVA Team, I have submitted advertising order #{ORDER_NUMBER} for "{TITLE}" and would like to confirm my payment.',
     },
     manualPaymentInstructions: {
       type: String,
-      default: 'Please make a direct bank transfer to our official brokerage account and send receipt confirmation to our Admin WhatsApp line.',
+      default: 'Please make a direct transfer to our official brokerage account below and upload your payment receipt directly on this page for admin verification.',
     },
     bankDetails: {
-      bankName: { type: String, default: 'Zenith Bank Nigeria' },
+      bankName: { type: String, default: 'Zenith Bank' },
       accountName: { type: String, default: 'MEDIOVA Media Brokerage Ltd' },
       accountNumber: { type: String, default: '1012345678' },
+      currency: { type: String, default: 'NGN' },
+      sortCode: { type: String, default: '' },
+      swiftBic: { type: String, default: '' },
+    },
+    maxCampaignAreas: {
+      type: Number,
+      default: 15,
+      min: 1,
+      max: 100,
     },
     minInfluencerViews: {
       type: Number,

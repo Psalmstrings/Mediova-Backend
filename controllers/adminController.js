@@ -12,6 +12,9 @@ const AdminSettings = require('../models/AdminSettings');
 const RefundRequest = require('../models/RefundRequest');
 const Complaint = require('../models/Complaint');
 const SupportTicket = require('../models/SupportTicket');
+const VerificationSubmission = require('../models/VerificationSubmission');
+const Payment = require('../models/Payment');
+const { processUploadedFile } = require('../middleware/upload');
 const { sendEmail } = require('../config/email');
 const emailTemplates = require('../utils/emailTemplates');
 
@@ -204,12 +207,34 @@ const getAllInfluencers = async (req, res, next) => {
       .skip(skip)
       .limit(Number(limit));
 
+    // Attach latest verification submission for each influencer so admin can view/download video directly
+    const influencerUserIds = profiles.map((p) => p.userId?._id).filter(Boolean);
+    const submissions = await VerificationSubmission.find({
+      influencerId: { $in: influencerUserIds },
+    }).sort({ createdAt: -1 });
+
+    const submissionMap = {};
+    submissions.forEach((sub) => {
+      const key = sub.influencerId.toString();
+      if (!submissionMap[key]) {
+        submissionMap[key] = sub;
+      }
+    });
+
+    const enrichedProfiles = profiles.map((p) => {
+      const obj = p.toObject();
+      if (p.userId?._id) {
+        obj.latestVerification = submissionMap[p.userId._id.toString()] || null;
+      }
+      return obj;
+    });
+
     res.status(200).json({
       success: true,
       total,
       pages: Math.ceil(total / Number(limit)),
       page: Number(page),
-      influencers: profiles,
+      influencers: enrichedProfiles,
     });
   } catch (error) {
     next(error);
@@ -230,7 +255,107 @@ const getInfluencerById = async (req, res, next) => {
       .sort({ createdAt: -1 })
       .limit(10);
 
-    res.status(200).json({ success: true, profile, recentGigs: gigs });
+    const latestVerification = await VerificationSubmission.findOne({ influencerId: req.params.id }).sort({ createdAt: -1 });
+
+    res.status(200).json({ success: true, profile, latestVerification, recentGigs: gigs });
+  } catch (error) {
+    next(error);
+  }
+};
+
+const getVerificationSubmissions = async (req, res, next) => {
+  try {
+    const { status, page = 1, limit = 20 } = req.query;
+    const query = {};
+    if (status && status !== 'all') {
+      query.status = status;
+    }
+    const submissions = await VerificationSubmission.find(query)
+      .populate('influencerId', 'name email phone whatsappNumber country countryCode location profileImage influencerVerificationStatus')
+      .populate('reviewedBy', 'name email')
+      .sort({ createdAt: -1 })
+      .skip((Number(page) - 1) * Number(limit))
+      .limit(Number(limit));
+
+    const total = await VerificationSubmission.countDocuments(query);
+
+    res.status(200).json({
+      success: true,
+      count: submissions.length,
+      total,
+      submissions,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+const reviewVerificationSubmission = async (req, res, next) => {
+  try {
+    const { decision, verifiedViews, adminNotes, rejectionReason } = req.body;
+    // decision: 'verified' | 'rejected'
+
+    if (!['verified', 'rejected'].includes(decision)) {
+      return res.status(400).json({
+        success: false,
+        message: "Decision must be either 'verified' or 'rejected'.",
+      });
+    }
+
+    const submission = await VerificationSubmission.findById(req.params.id);
+    if (!submission) {
+      return res.status(404).json({ success: false, message: 'Verification submission not found.' });
+    }
+
+    const influencerId = submission.influencerId;
+    submission.status = decision;
+    submission.adminDecision = decision;
+    submission.reviewedBy = req.user._id;
+    submission.reviewedAt = new Date();
+    if (verifiedViews !== undefined) submission.verifiedViews = Number(verifiedViews);
+    if (rejectionReason) submission.rejectionReason = rejectionReason;
+    if (adminNotes) submission.notes = adminNotes;
+
+    submission.history.push({
+      action: decision === 'verified' ? 'admin_approved' : 'admin_rejected',
+      status: decision,
+      notes: adminNotes || rejectionReason || '',
+      timestamp: new Date(),
+      by: req.user._id,
+    });
+    await submission.save();
+
+    // Update InfluencerProfile and User
+    const profile = await InfluencerProfile.findOne({ userId: influencerId });
+    if (profile) {
+      profile.verificationStatus = decision;
+      if (verifiedViews !== undefined) profile.verifiedViews = Number(verifiedViews);
+      if (adminNotes) profile.adminNotes = adminNotes;
+      await profile.save();
+    }
+
+    await User.findByIdAndUpdate(influencerId, {
+      influencerVerificationStatus: decision,
+    });
+
+    // Notify influencer
+    await Notification.create({
+      userId: influencerId,
+      title: decision === 'verified' ? '✅ Account Verified & Gig-Eligible!' : '⚠️ Verification Video Rejected',
+      message:
+        decision === 'verified'
+          ? `Congratulations! Your verification video has been approved by the Admin team. You are now officially verified and eligible for paid gig assignments!`
+          : `Your verification submission was not approved: ${rejectionReason || adminNotes || 'Video did not meet verification criteria'}. You may submit a corrected verification video.`,
+      type: decision === 'verified' ? 'success' : 'warning',
+      link: '/influencer/dashboard',
+    });
+
+    res.status(200).json({
+      success: true,
+      message: `Verification submission ${decision} successfully.`,
+      submission,
+      profile,
+    });
   } catch (error) {
     next(error);
   }
@@ -238,7 +363,7 @@ const getInfluencerById = async (req, res, next) => {
 
 const verifyInfluencer = async (req, res, next) => {
   try {
-    const { verificationStatus, verifiedViews, adminNotes } = req.body;
+    const { verificationStatus, verifiedViews, adminNotes, rejectionReason } = req.body;
 
     const profile = await InfluencerProfile.findOne({ userId: req.params.id });
     if (!profile) return res.status(404).json({ success: false, message: 'Influencer not found' });
@@ -248,13 +373,30 @@ const verifyInfluencer = async (req, res, next) => {
     if (adminNotes) profile.adminNotes = adminNotes;
     await profile.save();
 
+    await User.findByIdAndUpdate(req.params.id, {
+      influencerVerificationStatus: verificationStatus,
+    });
+
+    // Also update any pending verification submission
+    await VerificationSubmission.updateMany(
+      { influencerId: req.params.id, status: { $in: ['pending', 'under_review'] } },
+      {
+        status: verificationStatus,
+        adminDecision: verificationStatus,
+        reviewedBy: req.user._id,
+        reviewedAt: new Date(),
+        rejectionReason: rejectionReason || '',
+        notes: adminNotes || '',
+      }
+    );
+
     await Notification.create({
       userId: req.params.id,
       title: verificationStatus === 'verified' ? '✅ Reach Verified!' : '⚠️ Verification Update',
       message:
         verificationStatus === 'verified'
           ? `Your WhatsApp reach of ${Number(verifiedViews).toLocaleString()} views has been verified by the Admin. You are now eligible for gig assignments!`
-          : `Your reach verification status has been updated to: ${verificationStatus}. ${adminNotes || ''}`,
+          : `Your reach verification status has been updated to: ${verificationStatus}. ${adminNotes || rejectionReason || ''}`,
       type: verificationStatus === 'verified' ? 'success' : 'warning',
     });
 
@@ -374,12 +516,16 @@ const getAllCampaigns = async (req, res, next) => {
 
 const getCampaignById = async (req, res, next) => {
   try {
-    const campaign = await Campaign.findById(req.params.id).populate('vendorId', 'name email phone');
+    const campaign = await Campaign.findById(req.params.id).populate('vendorId', 'name email phone whatsappNumber country location');
     if (!campaign) return res.status(404).json({ success: false, message: 'Campaign not found' });
 
+    const vendorProfile = await VendorProfile.findOne({ userId: campaign.vendorId?._id });
+
     const gigs = await Gig.find({ campaignId: campaign._id })
-      .populate('influencerId', 'name email profileImage')
+      .populate('influencerId', 'name email whatsappNumber profileImage')
       .sort({ createdAt: -1 });
+
+    const payment = await Payment.findOne({ campaignId: campaign._id });
 
     const gigStats = {
       total: gigs.length,
@@ -391,7 +537,161 @@ const getCampaignById = async (req, res, next) => {
       declined: gigs.filter((g) => g.status === 'declined').length,
     };
 
-    res.status(200).json({ success: true, campaign, gigs, gigStats });
+    res.status(200).json({ success: true, campaign, vendorProfile, gigs, gigStats, payment });
+  } catch (error) {
+    next(error);
+  }
+};
+
+const verifyCampaignPayment = async (req, res, next) => {
+  try {
+    const { decision, rejectionReason, notes } = req.body;
+    // decision: 'confirmed' | 'rejected'
+
+    if (!['confirmed', 'rejected'].includes(decision)) {
+      return res.status(400).json({ success: false, message: "Decision must be 'confirmed' or 'rejected'." });
+    }
+
+    const campaign = await Campaign.findById(req.params.id).populate('vendorId', 'name email phone whatsappNumber country location');
+    if (!campaign) return res.status(404).json({ success: false, message: 'Campaign not found' });
+
+    campaign.paymentStatus = decision;
+    campaign.status = decision === 'confirmed' ? 'Payment Confirmed' : 'Awaiting Payment';
+    campaign.paymentReview = {
+      reviewedBy: req.user._id,
+      reviewedAt: new Date(),
+      decision,
+      rejectionReason: rejectionReason || '',
+    };
+    if (notes) campaign.notes = notes;
+    await campaign.save();
+
+    // Update Payment record
+    const payment = await Payment.findOne({ campaignId: campaign._id });
+    if (payment) {
+      payment.status = decision;
+      payment.reviewedBy = req.user._id;
+      payment.reviewedAt = new Date();
+      payment.rejectionReason = rejectionReason || '';
+      payment.adminNotes = notes || '';
+      await payment.save();
+    }
+
+    // In-app notification for vendor
+    await Notification.create({
+      userId: campaign.vendorId._id,
+      title: decision === 'confirmed' ? '✅ Payment Verified & Confirmed' : '⚠️ Payment Verification Issue',
+      message:
+        decision === 'confirmed'
+          ? `Your payment for order #${campaign.orderNumber} has been verified and confirmed. Campaign execution is now in progress.`
+          : `Payment verification issue on order #${campaign.orderNumber}: ${rejectionReason || 'Receipt could not be verified'}. Please review your payment details.`,
+      type: decision === 'confirmed' ? 'success' : 'warning',
+      link: `/vendor/orders/${campaign._id}`,
+    });
+
+    res.status(200).json({
+      success: true,
+      message: `Campaign payment ${decision} successfully`,
+      campaign,
+      payment,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+const submitCompletedWork = async (req, res, next) => {
+  try {
+    const { summary, notes } = req.body;
+    if (!summary || !summary.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: 'Completion summary is required.',
+      });
+    }
+
+    const campaign = await Campaign.findById(req.params.id).populate('vendorId', 'name email phone whatsappNumber country location');
+    if (!campaign) return res.status(404).json({ success: false, message: 'Campaign not found' });
+
+    const files = req.files || (req.file ? [req.file] : []);
+    const evidenceUrls = [];
+
+    for (const f of files) {
+      const uploaded = await processUploadedFile(f, 'completed_work_evidence');
+      if (uploaded) {
+        evidenceUrls.push({
+          url: uploaded.url,
+          caption: f.originalname || 'Completion Proof',
+          publicId: uploaded.publicId,
+          mediaType: uploaded.resourceType === 'video' ? 'video' : 'image',
+          uploadedAt: new Date(),
+        });
+      }
+    }
+
+    campaign.status = 'Submitted for Vendor Review';
+    campaign.completedWork = {
+      summary: summary.trim(),
+      notes: notes || '',
+      evidenceUrls: evidenceUrls.length > 0 ? evidenceUrls : (campaign.completedWork?.evidenceUrls || []),
+      submittedAt: new Date(),
+      submittedBy: req.user._id,
+      vendorReviewStatus: 'submitted',
+      vendorReviewComment: '',
+      history: [
+        ...(campaign.completedWork?.history || []),
+        {
+          action: 'admin_submitted',
+          notes: summary.trim(),
+          timestamp: new Date(),
+          by: req.user._id,
+        },
+      ],
+    };
+
+    await campaign.save();
+
+    await Notification.create({
+      userId: campaign.vendorId._id,
+      title: '🎯 Campaign Work Ready for Your Review',
+      message: `Admin has submitted completed work details for Order #${campaign.orderNumber} ("${campaign.title}"). Please review and accept the work.`,
+      type: 'info',
+      link: `/vendor/orders/${campaign._id}`,
+    });
+
+    res.status(200).json({
+      success: true,
+      message: 'Completed work submitted for vendor review successfully.',
+      campaign,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+const getAllPayments = async (req, res, next) => {
+  try {
+    const { status, page = 1, limit = 20 } = req.query;
+    const query = {};
+    if (status && status !== 'all') {
+      query.status = status;
+    }
+    const payments = await Payment.find(query)
+      .populate('vendorId', 'name email phone whatsappNumber')
+      .populate('campaignId', 'orderNumber title price currency paymentStatus status targetCountry targetRegion')
+      .populate('reviewedBy', 'name email')
+      .sort({ createdAt: -1 })
+      .skip((Number(page) - 1) * Number(limit))
+      .limit(Number(limit));
+
+    const total = await Payment.countDocuments(query);
+
+    res.status(200).json({
+      success: true,
+      count: payments.length,
+      total,
+      payments,
+    });
   } catch (error) {
     next(error);
   }
@@ -400,7 +700,7 @@ const getCampaignById = async (req, res, next) => {
 const updateCampaignStatus = async (req, res, next) => {
   try {
     const { status, paymentStatus, notes, rejectionReason, startDate, endDate } = req.body;
-    const campaign = await Campaign.findById(req.params.id).populate('vendorId', 'name email');
+    const campaign = await Campaign.findById(req.params.id).populate('vendorId', 'name email phone whatsappNumber country location');
     if (!campaign) return res.status(404).json({ success: false, message: 'Campaign not found' });
 
     if (status) campaign.status = status;
@@ -455,6 +755,20 @@ const assignGigs = async (req, res, next) => {
 
     const campaign = await Campaign.findById(campaignId);
     if (!campaign) return res.status(404).json({ success: false, message: 'Campaign not found' });
+
+    // Enforce strict backend gig-eligibility verification check
+    for (const assignment of assignments) {
+      const { influencerId } = assignment;
+      const influencerProfile = await InfluencerProfile.findOne({ userId: influencerId });
+      const influencerUser = await User.findById(influencerId);
+
+      if (!influencerProfile || influencerProfile.verificationStatus !== 'verified') {
+        return res.status(400).json({
+          success: false,
+          message: `Influencer "${influencerUser?.name || influencerId}" is not verified (status: ${influencerProfile?.verificationStatus || 'none'}). Only approved, verified influencers are eligible for gig assignments.`,
+        });
+      }
+    }
 
     const createdGigs = [];
     let totalNewReach = 0;
@@ -1244,12 +1558,17 @@ module.exports = {
   getAllInfluencers,
   getInfluencerById,
   verifyInfluencer,
+  getVerificationSubmissions,
+  reviewVerificationSubmission,
   updateInfluencerAvailability,
   getAllVendors,
   getVendorById,
   getAllCampaigns,
   getCampaignById,
   updateCampaignStatus,
+  verifyCampaignPayment,
+  submitCompletedWork,
+  getAllPayments,
   assignGigs,
   reviewGigSubmission,
   getAllGigSubmissions,

@@ -23,11 +23,34 @@ const userSchema = new mongoose.Schema(
       type: String,
       trim: true,
     },
+    whatsappNumber: {
+      type: String,
+      trim: true,
+    },
+    country: {
+      type: String,
+      default: 'Nigeria',
+      trim: true,
+    },
+    countryCode: {
+      type: String,
+      default: 'NG',
+      trim: true,
+    },
+    location: {
+      region: { type: String, default: '', trim: true },
+      subDivision: { type: String, default: '', trim: true },
+      area: { type: String, default: '', trim: true },
+    },
     password: {
       type: String,
-      required: [true, 'Please provide a password'],
+      required: function () {
+        return this.authProvider === 'local';
+      },
       validate: {
         validator: function (val) {
+          // If Google user or not provided (when optional)
+          if (!val && this.authProvider === 'google') return true;
           // If already hashed (bcrypt hash length is 60), pass validation
           if (val && val.length === 60 && val.startsWith('$2')) return true;
           return (
@@ -44,6 +67,27 @@ const userSchema = new mongoose.Schema(
       },
       select: false,
     },
+    authProvider: {
+      type: String,
+      enum: ['local', 'google'],
+      default: 'local',
+    },
+    googleId: {
+      type: String,
+      default: '',
+      select: false,
+    },
+    termsAccepted: {
+      type: Boolean,
+      default: false,
+    },
+    termsAcceptedVersion: {
+      type: String,
+      default: '2.0',
+    },
+    termsAcceptedAt: {
+      type: Date,
+    },
     role: {
       type: String,
       enum: ['influencer', 'vendor', 'admin'],
@@ -57,6 +101,11 @@ const userSchema = new mongoose.Schema(
       type: String,
       enum: ['pending', 'active', 'suspended'],
       default: 'active',
+    },
+    influencerVerificationStatus: {
+      type: String,
+      enum: ['none', 'pending', 'under_review', 'verified', 'rejected'],
+      default: 'none',
     },
     profileImage: {
       type: String,
@@ -78,7 +127,7 @@ const userSchema = new mongoose.Schema(
 
 // Hash password before saving
 userSchema.pre('save', async function (next) {
-  if (!this.isModified('password')) {
+  if (!this.isModified('password') || !this.password) {
     return next();
   }
   const salt = await bcrypt.genSalt(10);
@@ -88,6 +137,7 @@ userSchema.pre('save', async function (next) {
 
 // Compare password method
 userSchema.methods.matchPassword = async function (enteredPassword) {
+  if (!this.password) return false;
   return await bcrypt.compare(enteredPassword, this.password);
 };
 

@@ -124,14 +124,17 @@ runTest('Campaign Target Parser: Handles nationwide toggle correctly', () => {
   assert.strictEqual(parsed.state, 'Nationwide');
 });
 
-// 6. Model Schemas: Load RefundRequest, Complaint, SupportTicket, InfluencerProfile, Campaign, User (Findings 5, 8 - 12)
-runTest('Model Schemas: Load RefundRequest, Complaint, SupportTicket, InfluencerProfile, Campaign, User', () => {
+// 6. Model Schemas: Load RefundRequest, Complaint, SupportTicket, InfluencerProfile, Campaign, User, VerificationSubmission, Payment
+runTest('Model Schemas: Load RefundRequest, Complaint, SupportTicket, InfluencerProfile, Campaign, User, VerificationSubmission, Payment', () => {
   const RefundRequest = require('./models/RefundRequest');
   const Complaint = require('./models/Complaint');
   const SupportTicket = require('./models/SupportTicket');
   const InfluencerProfile = require('./models/InfluencerProfile');
   const Campaign = require('./models/Campaign');
   const User = require('./models/User');
+  const VerificationSubmission = require('./models/VerificationSubmission');
+  const Payment = require('./models/Payment');
+  const AdminSettings = require('./models/AdminSettings');
 
   assert.ok(RefundRequest.schema.path('transferReference'));
   assert.ok(Complaint.schema.path('complaintNumber'));
@@ -139,10 +142,63 @@ runTest('Model Schemas: Load RefundRequest, Complaint, SupportTicket, Influencer
   assert.ok(InfluencerProfile.schema.path('payoutStatus'));
   assert.ok(Campaign.schema.path('targetStates'));
   assert.ok(Campaign.schema.path('isNationwide'));
+  assert.ok(Campaign.schema.path('targetCountry'));
+  assert.ok(Campaign.schema.path('targetAreas'));
+  assert.ok(Campaign.schema.path('paymentReceipt.url'));
+  assert.ok(Campaign.schema.path('completedWork.summary'));
   assert.ok(User.schema.path('resetPasswordToken'));
+  assert.ok(User.schema.path('termsAccepted'));
+  assert.ok(User.schema.path('termsAcceptedVersion'));
+  assert.ok(User.schema.path('termsAcceptedAt'));
+  assert.ok(User.schema.path('country'));
+  assert.ok(User.schema.path('whatsappNumber'));
+  assert.ok(VerificationSubmission.schema.path('videoUrl'));
+  assert.ok(VerificationSubmission.schema.path('status'));
+  assert.ok(Payment.schema.path('amount'));
+  assert.ok(AdminSettings.schema.path('maxCampaignAreas'));
 });
 
-// 7. Express Route Modules Loaded Cleanly
+// 7. Global Country Dataset & Multi-Country Support
+runTest('Global Countries Dataset: Contains 100+ countries with calling codes & alphabetical ordering', () => {
+  const { COUNTRIES, getCountryMeta, isValidCountry } = require('./utils/locations');
+  assert.ok(COUNTRIES.length >= 100, `Expected >= 100 countries, found ${COUNTRIES.length}`);
+  
+  // Verify alphabetical ordering
+  for (let i = 0; i < COUNTRIES.length - 1; i++) {
+    assert.ok(
+      COUNTRIES[i].name.localeCompare(COUNTRIES[i + 1].name) <= 0,
+      `Countries not sorted: ${COUNTRIES[i].name} should precede ${COUNTRIES[i + 1].name}`
+    );
+  }
+
+  // Spot check key countries
+  const us = getCountryMeta('United States');
+  assert.strictEqual(us?.name, 'United States');
+  assert.strictEqual(us?.callingCode, '+1');
+
+  const gb = getCountryMeta('United Kingdom');
+  assert.strictEqual(gb?.name, 'United Kingdom');
+  assert.strictEqual(gb?.callingCode, '+44');
+
+  const ng = getCountryMeta('Nigeria');
+  assert.strictEqual(ng?.name, 'Nigeria');
+  assert.strictEqual(ng?.callingCode, '+234');
+  assert.strictEqual(isValidCountry('Nigeria'), true);
+  assert.strictEqual(isValidCountry('Atlantis'), false);
+});
+
+// 8. Video Proof Mime-Types & Resilient Upload
+runTest('Upload Validation: Video extensions and mime-types supported in upload filters', () => {
+  const { allowedMimeTypes } = require('./middleware/upload');
+  assert.ok(allowedMimeTypes.includes('video/mp4'));
+  assert.ok(allowedMimeTypes.includes('video/quicktime'));
+  assert.ok(allowedMimeTypes.includes('video/webm'));
+  assert.ok(allowedMimeTypes.includes('image/jpeg'));
+  assert.ok(allowedMimeTypes.includes('image/png'));
+  assert.strictEqual(allowedMimeTypes.includes('application/pdf'), false);
+});
+
+// 9. Express Route Modules Loaded Cleanly
 runTest('Routes: All endpoint routers initialize cleanly', () => {
   const authRoutes = require('./routes/auth');
   const influencerRoutes = require('./routes/influencers');

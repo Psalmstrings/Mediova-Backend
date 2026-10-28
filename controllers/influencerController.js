@@ -2,10 +2,12 @@ const InfluencerProfile = require('../models/InfluencerProfile');
 const User = require('../models/User');
 const Gig = require('../models/Gig');
 const GigSubmission = require('../models/GigSubmission');
+const VerificationSubmission = require('../models/VerificationSubmission');
 const Transaction = require('../models/Transaction');
 const Notification = require('../models/Notification');
 const Campaign = require('../models/Campaign');
 const { processUploadedFile } = require('../middleware/upload');
+const { normalizePhoneNumber, isValidPhoneNumber } = require('../utils/locations');
 
 /**
  * @desc    Get current influencer's full profile
@@ -16,14 +18,17 @@ const getMyProfile = async (req, res, next) => {
   try {
     const profile = await InfluencerProfile.findOne({ userId: req.user._id }).populate(
       'userId',
-      'name email phone profileImage'
+      'name email phone whatsappNumber country countryCode location influencerVerificationStatus profileImage'
     );
 
     if (!profile) {
       return res.status(404).json({ success: false, message: 'Influencer profile not found' });
     }
 
-    res.status(200).json({ success: true, profile });
+    // Also fetch latest verification submission if available
+    const latestVerification = await VerificationSubmission.findOne({ influencerId: req.user._id }).sort({ createdAt: -1 });
+
+    res.status(200).json({ success: true, profile, verificationSubmission: latestVerification });
   } catch (error) {
     next(error);
   }
@@ -38,33 +43,59 @@ const updateProfile = async (req, res, next) => {
   try {
     const {
       name,
-      phone,
       whatsappNumber,
-      state,
-      city,
-      lga,
+      phone,
+      country,
+      region,
+      subDivision,
       area,
-      additionalAreas,
+      state, // backward compatibility
+      lga, // backward compatibility
       categories,
     } = req.body;
 
-    // Update user record
-    if (name || phone) {
-      await User.findByIdAndUpdate(req.user._id, {
-        ...(name && { name }),
-        ...(phone && { phone }),
-      });
+    const rawPhone = whatsappNumber || phone;
+    let normalizedWhatsapp = null;
+    if (rawPhone) {
+      normalizedWhatsapp = normalizePhoneNumber(rawPhone);
+      if (!isValidPhoneNumber(normalizedWhatsapp)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Please provide a valid WhatsApp phone number in international format.',
+        });
+      }
     }
+
+    // Update user record
+    const userUpdates = {};
+    if (name) userUpdates.name = name.trim();
+    if (normalizedWhatsapp) {
+      userUpdates.whatsappNumber = normalizedWhatsapp;
+      userUpdates.phone = normalizedWhatsapp;
+    }
+    if (country) userUpdates.country = country;
+    if (region || subDivision || area) {
+      userUpdates.location = {
+        region: region || state || '',
+        subDivision: subDivision || lga || '',
+        area: area || '',
+      };
+    }
+
+    if (Object.keys(userUpdates).length > 0) {
+      await User.findByIdAndUpdate(req.user._id, userUpdates);
+    }
+
+    const resolvedRegion = region || state;
+    const resolvedSub = subDivision || lga;
 
     const profile = await InfluencerProfile.findOneAndUpdate(
       { userId: req.user._id },
       {
-        ...(whatsappNumber && { whatsappNumber }),
-        ...(state && { state }),
-        ...(city !== undefined && { city }),
-        ...(lga !== undefined && { lga }),
-        ...(area && { area }),
-        ...(additionalAreas && { additionalAreas }),
+        ...(normalizedWhatsapp && { whatsappNumber: normalizedWhatsapp }),
+        ...(resolvedRegion && { state: resolvedRegion }),
+        ...(resolvedSub !== undefined && { city: resolvedSub, lga: resolvedSub }),
+        ...(area !== undefined && { area }),
         ...(categories && { categories }),
       },
       { new: true }
@@ -114,23 +145,16 @@ const updateAvailability = async (req, res, next) => {
  */
 const updateBankDetails = async (req, res, next) => {
   try {
-    const { accountName, bankName, accountNumber } = req.body;
+    const { accountName, bankName, accountNumber, currency = 'NGN', routingOrSortCode = '' } = req.body;
 
     if (!accountName || !bankName || !accountNumber) {
       return res.status(400).json({
         success: false,
-        message: 'Account Name, Bank Name, and Account Number are all required.',
+        message: 'Account Name, Bank Name, and Account/IBAN Number are required.',
       });
     }
 
-    const cleanAccountNum = String(accountNumber).replace(/[^0-9]/g, '');
-    if (cleanAccountNum.length !== 10) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid account number. Nigerian NUBAN accounts must be exactly 10 digits.',
-      });
-    }
-
+    const cleanAccountNum = String(accountNumber).trim();
     const profile = await InfluencerProfile.findOne({ userId: req.user._id });
     if (!profile) {
       return res.status(404).json({ success: false, message: 'Profile not found' });
@@ -149,7 +173,7 @@ const updateBankDetails = async (req, res, next) => {
     profile.payoutAuditLog.push({
       action: 'bank_details_updated',
       timestamp: new Date(),
-      note: `Bank updated to ${bankName} (${cleanAccountNum.slice(-4)})`,
+      note: `Bank updated to ${bankName} (${cleanAccountNum.slice(-4)}) [${currency}]`,
     });
 
     await profile.save();
@@ -171,25 +195,158 @@ const updateBankDetails = async (req, res, next) => {
 };
 
 /**
- * @desc    Submit reach proof screenshots
+ * @desc    Submit account verification video (Mandatory before gig eligibility)
+ * @route   POST /api/influencers/verify-account
+ * @access  Private (Influencer)
+ */
+const submitVerificationVideo = async (req, res, next) => {
+  try {
+    const file = req.file || (req.files && req.files[0]);
+
+    if (!file) {
+      return res.status(400).json({
+        success: false,
+        message: 'Please select a valid verification video recording to upload.',
+      });
+    }
+
+    // Process and store video in Cloudinary or local fallback
+    const uploaded = await processUploadedFile(file, 'influencer_verifications');
+    if (!uploaded || !uploaded.url) {
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to upload verification video. Please try again.',
+      });
+    }
+
+    const notes = req.body.notes || '';
+    const averageViews = Number(req.body.averageViews) || 0;
+
+    // Check for existing pending/under_review submission
+    let submission = await VerificationSubmission.findOne({
+      influencerId: req.user._id,
+      status: { $in: ['pending', 'under_review'] },
+    });
+
+    if (submission) {
+      submission.videoUrl = uploaded.url;
+      submission.publicId = uploaded.publicId;
+      submission.fileFormat = uploaded.format || 'mp4';
+      submission.status = 'under_review';
+      submission.notes = notes || submission.notes;
+      submission.history.push({
+        action: 'resubmission',
+        status: 'under_review',
+        notes: 'Updated verification video uploaded',
+        timestamp: new Date(),
+        by: req.user._id,
+      });
+      await submission.save();
+    } else {
+      submission = await VerificationSubmission.create({
+        influencerId: req.user._id,
+        videoUrl: uploaded.url,
+        publicId: uploaded.publicId,
+        mediaType: 'video',
+        fileFormat: uploaded.format || 'mp4',
+        status: 'under_review',
+        notes,
+        history: [
+          {
+            action: 'initial_submission',
+            status: 'under_review',
+            notes: 'Verification video submitted for review',
+            timestamp: new Date(),
+            by: req.user._id,
+          },
+        ],
+      });
+    }
+
+    // Update user and profile statuses
+    await User.findByIdAndUpdate(req.user._id, {
+      influencerVerificationStatus: 'under_review',
+    });
+
+    const profile = await InfluencerProfile.findOne({ userId: req.user._id });
+    if (profile) {
+      profile.verificationStatus = 'pending';
+      if (averageViews > 0) profile.averageViews = averageViews;
+      await profile.save();
+    }
+
+    // Notify influencer
+    await Notification.create({
+      userId: req.user._id,
+      title: 'Verification Video Received',
+      message: 'Your account verification video has been received and is currently under review by our admin team.',
+      type: 'info',
+    });
+
+    // Notify admins
+    const admins = await User.find({ role: 'admin' });
+    for (const admin of admins) {
+      await Notification.create({
+        userId: admin._id,
+        title: 'New Influencer Verification Submission',
+        message: `${req.user.name} submitted a verification video for review.`,
+        type: 'info',
+        link: '/admin/influencers',
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: 'Verification video submitted successfully! Admin will review your account shortly.',
+      submission,
+      verificationStatus: 'under_review',
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * @desc    Get account verification status & submission
+ * @route   GET /api/influencers/verification-status
+ * @access  Private (Influencer)
+ */
+const getVerificationStatus = async (req, res, next) => {
+  try {
+    const submission = await VerificationSubmission.findOne({ influencerId: req.user._id }).sort({ createdAt: -1 });
+    const profile = await InfluencerProfile.findOne({ userId: req.user._id });
+    const user = await User.findById(req.user._id).select('influencerVerificationStatus');
+
+    res.status(200).json({
+      success: true,
+      submission,
+      status: user?.influencerVerificationStatus || profile?.verificationStatus || 'pending',
+      isVerified: profile?.verificationStatus === 'verified',
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * @desc    Submit reach proof screenshots (Preserved for compatibility)
  * @route   POST /api/influencers/reach-proof
  * @access  Private (Influencer)
  */
 const submitReachProof = async (req, res, next) => {
   try {
     const { averageViews } = req.body;
-    const files = req.files || (req.file ? [req.file] : []);
+    const file = req.file || (req.files && req.files[0]);
 
     const profile = await InfluencerProfile.findOne({ userId: req.user._id });
     if (!profile) {
       return res.status(404).json({ success: false, message: 'Profile not found' });
     }
 
-    const uploadedProofImages = [];
-    for (const f of files) {
-      const uploaded = await processUploadedFile(f, 'reach_proofs');
+    if (file) {
+      const uploaded = await processUploadedFile(file, 'reach_proofs');
       if (uploaded) {
-        uploadedProofImages.push({
+        profile.proofImages.push({
           url: uploaded.url,
           publicId: uploaded.publicId,
           uploadedAt: new Date(),
@@ -200,15 +357,11 @@ const submitReachProof = async (req, res, next) => {
     if (averageViews) {
       profile.averageViews = Number(averageViews);
     }
-    if (uploadedProofImages.length > 0) {
-      profile.proofImages.push(...uploadedProofImages);
-    }
-    profile.verificationStatus = 'pending';
     await profile.save();
 
     res.status(200).json({
       success: true,
-      message: 'Reach proof submitted. Admin broker will verify your metrics shortly.',
+      message: 'Reach proof updated.',
       profile,
     });
   } catch (error) {
@@ -233,7 +386,7 @@ const getMyGigs = async (req, res, next) => {
     const gigs = await Gig.find(query)
       .populate({
         path: 'campaignId',
-        select: 'title description category objective media adCopy callToAction targetLocation duration startDate endDate instructions',
+        select: 'title description category objective media adCopy callToAction targetCountry targetRegion targetAreas duration startDate endDate instructions price',
       })
       .sort({ createdAt: -1 });
 
@@ -297,7 +450,7 @@ const acceptGig = async (req, res, next) => {
     await Notification.create({
       userId: req.user._id,
       title: 'Gig Accepted',
-      message: `You accepted gig #${gig.gigNumber}. Please post according to instructions and submit proof before deadline.`,
+      message: `You accepted gig #${gig.gigNumber}. Post according to instructions and submit video evidence before the deadline.`,
       type: 'gig',
       link: `/influencer/gigs/${gig._id}`,
     });
@@ -348,7 +501,7 @@ const declineGig = async (req, res, next) => {
 };
 
 /**
- * @desc    Submit gig proof (Status post + views screenshot)
+ * @desc    Submit gig completion video evidence
  * @route   POST /api/influencers/gigs/:id/submit
  * @access  Private (Influencer)
  */
@@ -364,23 +517,27 @@ const submitGigProof = async (req, res, next) => {
       return res.status(404).json({ success: false, message: 'Gig not found' });
     }
 
-    if (!['accepted', 'in_progress', 'rejected'].includes(gig.status)) {
+    if (!['accepted', 'in_progress', 'rejected', 'submitted'].includes(gig.status)) {
       return res.status(400).json({
         success: false,
         message: `Cannot submit proof for gig with status '${gig.status}'`,
       });
     }
 
-    const files = req.files || (req.file ? [req.file] : []);
+    const file = req.file || (req.files && req.files[0]);
+    let videoUrl = '';
+    let videoPublicId = '';
     const proofImages = [];
 
-    for (const f of files) {
-      const uploaded = await processUploadedFile(f, 'gig_proofs');
+    if (file) {
+      const uploaded = await processUploadedFile(file, 'gig_completion_videos');
       if (uploaded) {
+        videoUrl = uploaded.url;
+        videoPublicId = uploaded.publicId;
         proofImages.push({
           url: uploaded.url,
           publicId: uploaded.publicId,
-          type: 'status_post',
+          type: 'video',
           uploadedAt: new Date(),
         });
       }
@@ -391,6 +548,11 @@ const submitGigProof = async (req, res, next) => {
     if (submission) {
       submission.reportedViews = Number(reportedViews) || submission.reportedViews;
       submission.notes = notes || submission.notes;
+      if (videoUrl) {
+        submission.videoUrl = videoUrl;
+        submission.videoPublicId = videoPublicId;
+        submission.mediaType = 'video';
+      }
       if (proofImages.length > 0) {
         submission.proofImages.push(...proofImages);
       }
@@ -402,6 +564,9 @@ const submitGigProof = async (req, res, next) => {
         gigId: gig._id,
         campaignId: gig.campaignId,
         influencerId: req.user._id,
+        videoUrl,
+        videoPublicId,
+        mediaType: 'video',
         proofImages,
         reportedViews: Number(reportedViews) || 0,
         notes: notes || '',
@@ -416,14 +581,26 @@ const submitGigProof = async (req, res, next) => {
 
     await Notification.create({
       userId: req.user._id,
-      title: 'Proof Submitted',
-      message: `Your proof for gig #${gig.gigNumber} has been received and is awaiting Admin review.`,
+      title: 'Gig Evidence Submitted',
+      message: `Your video completion evidence for gig #${gig.gigNumber} has been received and is awaiting Admin review.`,
       type: 'info',
     });
 
+    // Notify admins
+    const admins = await User.find({ role: 'admin' });
+    for (const admin of admins) {
+      await Notification.create({
+        userId: admin._id,
+        title: 'New Gig Evidence Submitted',
+        message: `Influencer submitted completion video for Gig #${gig.gigNumber}.`,
+        type: 'gig',
+        link: `/admin/gigs/${gig._id}`,
+      });
+    }
+
     res.status(200).json({
       success: true,
-      message: 'Gig proof submitted successfully! Awaiting Admin Broker review.',
+      message: 'Gig completion video submitted successfully! Awaiting Admin review.',
       gig,
       submission,
     });
@@ -460,18 +637,6 @@ const getMyEarnings = async (req, res, next) => {
       .filter((t) => t.status === 'approved')
       .reduce((acc, curr) => acc + curr.amount, 0);
 
-    // Profile payout status
-    const profile = await InfluencerProfile.findOne({ userId: req.user._id });
-    const hasBank = Boolean(profile?.bankDetails?.accountNumber);
-    let calculatedStatus = profile?.payoutStatus || (hasBank ? 'verified' : 'not_configured');
-    if (hasBank && availableBalance > 0) {
-      calculatedStatus = 'eligible_for_payout';
-    }
-
-    const maskedAccount = profile?.bankDetails?.accountNumber
-      ? `•••• •••• ${profile.bankDetails.accountNumber.slice(-4)}`
-      : '';
-
     res.status(200).json({
       success: true,
       summary: {
@@ -479,22 +644,6 @@ const getMyEarnings = async (req, res, next) => {
         pendingEarnings,
         paidEarnings,
         availableBalance,
-      },
-      payoutSetup: {
-        status: calculatedStatus,
-        method: profile?.payoutMethod || 'bank_transfer',
-        bankDetails: {
-          accountName: profile?.bankDetails?.accountName || '',
-          bankName: profile?.bankDetails?.bankName || '',
-          accountNumber: maskedAccount,
-        },
-        eligibilityRules: {
-          qualifyingActivities: 'Approved WhatsApp Status gig verification by Admin broker',
-          verificationRequirement: 'Status view screenshots submitted within gig duration',
-          processingTimeline: '24 to 48 business hours following gig proof approval',
-          feesAndDeductions: '0% platform deductions (100% of agreed reward disbursed)',
-          minimumPayout: 0,
-        },
       },
       transactions,
     });
@@ -508,6 +657,8 @@ module.exports = {
   updateProfile,
   updateAvailability,
   updateBankDetails,
+  submitVerificationVideo,
+  getVerificationStatus,
   submitReachProof,
   getMyGigs,
   getGigDetails,

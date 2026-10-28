@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { protect, authorize } = require('../middleware/auth');
+const { upload } = require('../middleware/upload');
 const {
   getDashboardStats,
   getAllUsers,
@@ -8,12 +9,17 @@ const {
   getAllInfluencers,
   getInfluencerById,
   verifyInfluencer,
+  getVerificationSubmissions,
+  reviewVerificationSubmission,
   updateInfluencerAvailability,
   getAllVendors,
   getVendorById,
   getAllCampaigns,
   getCampaignById,
   updateCampaignStatus,
+  verifyCampaignPayment,
+  submitCompletedWork,
+  getAllPayments,
   assignGigs,
   reviewGigSubmission,
   getAllGigSubmissions,
@@ -54,6 +60,10 @@ router.get('/dashboard', getDashboardStats);
 router.get('/users', getAllUsers);
 router.patch('/users/:id/status', updateUserStatus);
 
+// Influencer Verification Queue
+router.get('/verifications', getVerificationSubmissions);
+router.patch('/verifications/:id/review', reviewVerificationSubmission);
+
 // Influencers
 router.get('/influencers', getAllInfluencers);
 router.get('/influencers/match', matchInfluencers);
@@ -65,10 +75,15 @@ router.patch('/influencers/:id/availability', updateInfluencerAvailability);
 router.get('/vendors', getAllVendors);
 router.get('/vendors/:id', getVendorById);
 
-// Campaigns
+// Campaigns & Payment Review
 router.get('/campaigns', getAllCampaigns);
 router.get('/campaigns/:id', getCampaignById);
 router.patch('/campaigns/:id/status', updateCampaignStatus);
+router.patch('/campaigns/:id/verify-payment', verifyCampaignPayment);
+router.post('/campaigns/:id/submit-completed-work', upload.array('evidence', 5), submitCompletedWork);
+
+// Payments & Receipts
+router.get('/payments', getAllPayments);
 
 // Gigs
 router.get('/gigs', getAllGigs);
@@ -93,7 +108,7 @@ router.post('/packages', createPackage);
 router.put('/packages/:id', updatePackage);
 router.delete('/packages/:id', deletePackage);
 
-// Settings
+// Settings (Targeting limits, payment instructions, etc.)
 router.get('/settings', getSettings);
 router.put('/settings', updateSettings);
 

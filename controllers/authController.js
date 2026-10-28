@@ -7,16 +7,19 @@ const Notification = require('../models/Notification');
 const generateToken = require('../utils/generateToken');
 const { sendEmail } = require('../config/email');
 const emailTemplates = require('../utils/emailTemplates');
-const { normalizePhoneNumber, isValidPhoneNumber } = require('../utils/locations');
+const {
+  normalizePhoneNumber,
+  isValidPhoneNumber,
+  isValidCountry,
+  getCountryMeta,
+} = require('../utils/locations');
 
 /**
  * Returns the primary frontend URL for verification and reset links.
- * Handles comma-separated values in CLIENT_URL (e.g. "https://mediova.vercel.app,http://localhost:5173")
  */
 const getClientUrl = () => {
   if (process.env.CLIENT_URL) {
     const urls = process.env.CLIENT_URL.split(',').map((u) => u.trim());
-    // Prioritize production HTTPS Vercel domain if present
     const prodUrl = urls.find((u) => u.startsWith('https://'));
     return prodUrl || urls[0] || 'https://mediova.vercel.app';
   }
@@ -24,7 +27,251 @@ const getClientUrl = () => {
 };
 
 /**
- * @desc    Register a new user (Influencer or Vendor)
+ * Verifies a Google ID token with Google's tokeninfo API
+ */
+const verifyGoogleToken = async (idToken) => {
+  if (!idToken) throw new Error('Google credential token is required');
+  const response = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(idToken)}`);
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`Google token validation failed: ${errText}`);
+  }
+  return await response.json();
+};
+
+/**
+ * @desc    Google OAuth Authentication / Registration
+ * @route   POST /api/auth/google
+ * @access  Public
+ */
+const googleAuth = async (req, res, next) => {
+  try {
+    const { credential, role = 'influencer', profileData } = req.body;
+
+    if (!credential) {
+      return res.status(400).json({ success: false, message: 'Google credential token is missing.' });
+    }
+
+    let googlePayload;
+    try {
+      googlePayload = await verifyGoogleToken(credential);
+    } catch (tokenErr) {
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid or expired Google authentication credentials. Please try again.',
+      });
+    }
+
+    const { sub: googleId, email, name, picture } = googlePayload;
+    const normalizedEmail = (email || '').trim().toLowerCase();
+
+    // Check if account already exists by googleId or email
+    let user = await User.findOne({ $or: [{ googleId }, { email: normalizedEmail }] });
+
+    if (user) {
+      // Prevent unauthorized role switching if user explicitly signed up with a different role
+      if (role && user.role !== role && user.role !== 'admin') {
+        return res.status(400).json({
+          success: false,
+          message: `This Google account is already registered as a ${user.role}. Please log in using the ${user.role} portal.`,
+        });
+      }
+
+      // Link googleId if missing
+      if (!user.googleId) {
+        user.googleId = googleId;
+        user.authProvider = 'google';
+        if (picture && !user.profileImage) user.profileImage = picture;
+        await user.save();
+      }
+
+      // Check if profile is complete (country, whatsappNumber, termsAccepted)
+      const hasWhatsapp = Boolean(user.whatsappNumber || user.phone);
+      const isComplete = Boolean(hasWhatsapp && user.country && user.termsAccepted);
+
+      if (!isComplete && profileData) {
+        // Complete profile with submitted data
+        const { whatsappNumber, country, region, subDivision, area, termsAccepted } = profileData;
+        if (termsAccepted) {
+          user.termsAccepted = true;
+          user.termsAcceptedVersion = '2.0';
+          user.termsAcceptedAt = new Date();
+        }
+        if (whatsappNumber) {
+          const norm = normalizePhoneNumber(whatsappNumber);
+          user.whatsappNumber = norm;
+          user.phone = norm;
+        }
+        if (country) {
+          user.country = country;
+          const meta = getCountryMeta(country);
+          user.countryCode = meta?.code || 'NG';
+        }
+        user.location = {
+          region: region || user.location?.region || '',
+          subDivision: subDivision || user.location?.subDivision || '',
+          area: area || user.location?.area || '',
+        };
+        await user.save();
+      }
+
+      let profile = null;
+      if (user.role === 'influencer') {
+        profile = await InfluencerProfile.findOne({ userId: user._id });
+      } else if (user.role === 'vendor') {
+        profile = await VendorProfile.findOne({ userId: user._id });
+      }
+
+      const token = generateToken(user._id, user.role);
+      return res.status(200).json({
+        success: true,
+        message: 'Google login successful',
+        token,
+        requiresOnboarding: !isComplete && !profileData,
+        user: {
+          id: user._id,
+          name: user.name,
+          email: user.email,
+          phone: user.phone || user.whatsappNumber,
+          whatsappNumber: user.whatsappNumber || user.phone,
+          country: user.country,
+          countryCode: user.countryCode,
+          location: user.location,
+          role: user.role,
+          profileImage: user.profileImage,
+          emailVerified: user.emailVerified,
+          accountStatus: user.accountStatus,
+          influencerVerificationStatus: user.influencerVerificationStatus,
+          termsAccepted: user.termsAccepted,
+          profile,
+        },
+      });
+    }
+
+    // User does not exist yet — check if onboarding profileData was submitted
+    if (!profileData || !profileData.termsAccepted) {
+      return res.status(200).json({
+        success: true,
+        requiresOnboarding: true,
+        googleUser: {
+          googleId,
+          email: normalizedEmail,
+          name,
+          picture,
+          role,
+        },
+      });
+    }
+
+    // Complete new registration with Google
+    const { whatsappNumber, country = 'Nigeria', region = '', subDivision = '', area = '', businessName } = profileData;
+
+    if (!profileData.termsAccepted) {
+      return res.status(400).json({
+        success: false,
+        message: 'You must read and agree to the Terms and Conditions to complete registration.',
+      });
+    }
+
+    const normWhatsapp = normalizePhoneNumber(whatsappNumber);
+    if (!normWhatsapp || !isValidPhoneNumber(normWhatsapp)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Please provide a valid WhatsApp phone number with international calling code.',
+      });
+    }
+
+    const countryMeta = getCountryMeta(country);
+
+    const newUser = await User.create({
+      name: name || 'MEDIOVA Member',
+      email: normalizedEmail,
+      phone: normWhatsapp,
+      whatsappNumber: normWhatsapp,
+      country: countryMeta.name,
+      countryCode: countryMeta.code,
+      location: {
+        region: region || '',
+        subDivision: subDivision || '',
+        area: area || '',
+      },
+      authProvider: 'google',
+      googleId,
+      profileImage: picture || '',
+      role: ['influencer', 'vendor'].includes(role) ? role : 'influencer',
+      emailVerified: true,
+      accountStatus: 'active',
+      termsAccepted: true,
+      termsAcceptedVersion: '2.0',
+      termsAcceptedAt: new Date(),
+      influencerVerificationStatus: role === 'influencer' ? 'pending' : 'none',
+    });
+
+    let newProfile = null;
+    if (newUser.role === 'influencer') {
+      newProfile = await InfluencerProfile.create({
+        userId: newUser._id,
+        whatsappNumber: normWhatsapp,
+        state: region || 'General',
+        city: subDivision || '',
+        lga: subDivision || '',
+        area: area || 'General',
+        verificationStatus: 'pending',
+      });
+    } else if (newUser.role === 'vendor') {
+      newProfile = await VendorProfile.create({
+        userId: newUser._id,
+        businessName: businessName || name,
+        contactPerson: name,
+        whatsapp: normWhatsapp,
+        phone: normWhatsapp,
+        state: region || 'General',
+        city: subDivision || '',
+        lga: subDivision || '',
+        area: area || '',
+        verificationStatus: 'verified',
+      });
+    }
+
+    await Notification.create({
+      userId: newUser._id,
+      title: 'Welcome to MEDIOVA!',
+      message: 'Your MEDIOVA global account has been created via Google.',
+      type: 'info',
+    });
+
+    const jwtToken = generateToken(newUser._id, newUser.role);
+
+    return res.status(201).json({
+      success: true,
+      message: 'Account created successfully with Google!',
+      token: jwtToken,
+      requiresOnboarding: false,
+      user: {
+        id: newUser._id,
+        name: newUser.name,
+        email: newUser.email,
+        phone: newUser.whatsappNumber,
+        whatsappNumber: newUser.whatsappNumber,
+        country: newUser.country,
+        countryCode: newUser.countryCode,
+        location: newUser.location,
+        role: newUser.role,
+        profileImage: newUser.profileImage,
+        emailVerified: true,
+        accountStatus: newUser.accountStatus,
+        influencerVerificationStatus: newUser.influencerVerificationStatus,
+        termsAccepted: newUser.termsAccepted,
+        profile: newProfile,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * @desc    Register a new user (Influencer or Vendor via Email/Password)
  * @route   POST /api/auth/register
  * @access  Public
  */
@@ -33,19 +280,18 @@ const register = async (req, res, next) => {
     const {
       name,
       email,
-      phone,
       password,
       role,
-      // Influencer-specific fields
       whatsappNumber,
-      state,
-      city,
-      lga,
+      phone, // fallback if sent
+      country = 'Nigeria',
+      region,
+      subDivision,
       area,
-      additionalAreas,
-      averageViews,
-      categories,
-      // Vendor-specific fields
+      state, // backward compatibility
+      lga, // backward compatibility
+      termsAccepted,
+      // Vendor-specific
       businessName,
       contactPerson,
       businessCategory,
@@ -53,12 +299,23 @@ const register = async (req, res, next) => {
       businessAddress,
       website,
       socialLinks,
+      // Influencer-specific
+      categories,
+      averageViews,
     } = req.body;
 
     if (!['influencer', 'vendor'].includes(role)) {
       return res.status(400).json({
         success: false,
         message: 'Registration role must be either influencer or vendor.',
+      });
+    }
+
+    // Backend Terms and Conditions acceptance enforcement
+    if (termsAccepted !== true && termsAccepted !== 'true') {
+      return res.status(400).json({
+        success: false,
+        message: 'You must read and agree to the Terms and Conditions before completing registration.',
       });
     }
 
@@ -90,19 +347,45 @@ const register = async (req, res, next) => {
       });
     }
 
-    // Normalize phone numbers to international E.164 standard
-    const normalizedPhone = normalizePhoneNumber(phone);
-    const normalizedWhatsapp = normalizePhoneNumber(whatsappNumber || phone);
+    // Single WhatsApp contact number normalization & validation
+    const rawNumber = whatsappNumber || phone;
+    const normalizedWhatsapp = normalizePhoneNumber(rawNumber);
 
-    // Create base user - immediately active and verified
+    if (!normalizedWhatsapp || !isValidPhoneNumber(normalizedWhatsapp)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Please provide a valid WhatsApp contact number with international calling code (e.g. +2348012345678).',
+      });
+    }
+
+    // Resolve country metadata
+    const countryMeta = getCountryMeta(country);
+    const resolvedRegion = region || state || 'General';
+    const resolvedSubDivision = subDivision || lga || '';
+    const resolvedArea = area || 'General';
+
+    // Create user
     const user = await User.create({
       name: (name || '').trim(),
       email: normalizedEmail,
-      phone: normalizedPhone,
+      phone: normalizedWhatsapp,
+      whatsappNumber: normalizedWhatsapp,
+      country: countryMeta.name,
+      countryCode: countryMeta.code,
+      location: {
+        region: resolvedRegion,
+        subDivision: resolvedSubDivision,
+        area: resolvedArea,
+      },
       password,
+      authProvider: 'local',
       role,
       emailVerified: true,
       accountStatus: 'active',
+      termsAccepted: true,
+      termsAcceptedVersion: '2.0',
+      termsAcceptedAt: new Date(),
+      influencerVerificationStatus: role === 'influencer' ? 'pending' : 'none',
     });
 
     // Create role-specific profile
@@ -111,11 +394,10 @@ const register = async (req, res, next) => {
       profile = await InfluencerProfile.create({
         userId: user._id,
         whatsappNumber: normalizedWhatsapp,
-        state: state || 'Lagos',
-        city: city || '',
-        lga: lga || '',
-        area: area || 'General',
-        additionalAreas: Array.isArray(additionalAreas) ? additionalAreas : [],
+        state: resolvedRegion,
+        city: resolvedSubDivision,
+        lga: resolvedSubDivision,
+        area: resolvedArea,
         averageViews: Number(averageViews) || 0,
         categories: Array.isArray(categories) ? categories : [],
         verificationStatus: 'pending',
@@ -127,12 +409,12 @@ const register = async (req, res, next) => {
         contactPerson: contactPerson || name,
         businessCategory: businessCategory || 'General Advertising',
         description: description || '',
-        phone: normalizedPhone,
+        phone: normalizedWhatsapp,
         whatsapp: normalizedWhatsapp,
-        state: state || 'Lagos',
-        city: city || '',
-        lga: lga || '',
-        area: area || '',
+        state: resolvedRegion,
+        city: resolvedSubDivision,
+        lga: resolvedSubDivision,
+        area: resolvedArea,
         businessAddress: businessAddress || '',
         website: website || '',
         socialLinks: socialLinks || {},
@@ -140,7 +422,6 @@ const register = async (req, res, next) => {
       });
     }
 
-    // In-app welcome notification
     await Notification.create({
       userId: user._id,
       title: 'Welcome to MEDIOVA!',
@@ -158,102 +439,19 @@ const register = async (req, res, next) => {
         id: user._id,
         name: user.name,
         email: user.email,
-        phone: user.phone,
+        phone: user.whatsappNumber,
+        whatsappNumber: user.whatsappNumber,
+        country: user.country,
+        countryCode: user.countryCode,
+        location: user.location,
         role: user.role,
         profileImage: user.profileImage,
         emailVerified: user.emailVerified,
         accountStatus: user.accountStatus,
+        influencerVerificationStatus: user.influencerVerificationStatus,
+        termsAccepted: user.termsAccepted,
         profile,
       },
-    });
-  } catch (error) {
-    next(error);
-  }
-};
-
-/**
- * @desc    Verify user email via token
- * @route   POST /api/auth/verify-email
- * @access  Public
- */
-const verifyEmail = async (req, res, next) => {
-  try {
-    const { token, email } = req.body;
-
-    if (!token) {
-      return res.status(400).json({
-        success: false,
-        message: 'Verification token is required.',
-      });
-    }
-
-    const cleanToken = token ? String(token).trim() : null;
-    const normalizedEmail = email ? String(email).trim().toLowerCase() : null;
-
-    let user = null;
-    if (cleanToken) {
-      const verificationToken = await VerificationToken.findOne({
-        token: cleanToken,
-        type: 'email_verify',
-      });
-      if (verificationToken) {
-        user = await User.findById(verificationToken.userId);
-        await VerificationToken.deleteMany({ userId: verificationToken.userId, type: 'email_verify' });
-      }
-    }
-
-    if (!user && normalizedEmail) {
-      user = await User.findOne({ email: normalizedEmail });
-    }
-
-    if (user) {
-      if (!user.emailVerified) {
-        user.emailVerified = true;
-        await user.save();
-      }
-      const jwtToken = generateToken(user._id, user.role);
-      return res.status(200).json({
-        success: true,
-        message: 'Email verification is no longer required on MEDIOVA. Your account is active.',
-        token: jwtToken,
-        user: {
-          id: user._id,
-          name: user.name,
-          email: user.email,
-          role: user.role,
-          emailVerified: true,
-        },
-      });
-    }
-
-    res.status(200).json({
-      success: true,
-      message: 'Email verification is no longer required on MEDIOVA. You can log in directly.',
-    });
-  } catch (error) {
-    next(error);
-  }
-};
-
-/**
- * @desc    Resend verification email (Stubbed for compatibility)
- * @route   POST /api/auth/resend-verification
- * @access  Public
- */
-const resendVerification = async (req, res, next) => {
-  try {
-    const { email } = req.body;
-    if (email) {
-      const normalizedEmail = String(email).trim().toLowerCase();
-      const user = await User.findOne({ email: normalizedEmail });
-      if (user && !user.emailVerified) {
-        user.emailVerified = true;
-        await user.save();
-      }
-    }
-    res.status(200).json({
-      success: true,
-      message: 'Email verification is no longer required on MEDIOVA. You can log in directly with your email and password.',
     });
   } catch (error) {
     next(error);
@@ -300,15 +498,8 @@ const login = async (req, res, next) => {
       });
     }
 
-    // Ensure previously unverified accounts are automatically marked verified and never blocked
-    if (!user.emailVerified) {
-      user.emailVerified = true;
-      await user.save();
-    }
-
     const token = generateToken(user._id, user.role);
 
-    // Fetch related profile if applicable
     let profile = null;
     if (user.role === 'influencer') {
       profile = await InfluencerProfile.findOne({ userId: user._id });
@@ -323,11 +514,17 @@ const login = async (req, res, next) => {
         id: user._id,
         name: user.name,
         email: user.email,
-        phone: user.phone,
+        phone: user.whatsappNumber || user.phone,
+        whatsappNumber: user.whatsappNumber || user.phone,
+        country: user.country || 'Nigeria',
+        countryCode: user.countryCode || 'NG',
+        location: user.location,
         role: user.role,
         profileImage: user.profileImage,
         emailVerified: user.emailVerified,
         accountStatus: user.accountStatus,
+        influencerVerificationStatus: user.influencerVerificationStatus || profile?.verificationStatus || 'pending',
+        termsAccepted: user.termsAccepted,
         profile,
       },
     });
@@ -344,8 +541,11 @@ const login = async (req, res, next) => {
 const getMe = async (req, res, next) => {
   try {
     const user = await User.findById(req.user.id);
-    let profile = null;
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
 
+    let profile = null;
     if (user.role === 'influencer') {
       profile = await InfluencerProfile.findOne({ userId: user._id });
     } else if (user.role === 'vendor') {
@@ -358,11 +558,17 @@ const getMe = async (req, res, next) => {
         id: user._id,
         name: user.name,
         email: user.email,
-        phone: user.phone,
+        phone: user.whatsappNumber || user.phone,
+        whatsappNumber: user.whatsappNumber || user.phone,
+        country: user.country || 'Nigeria',
+        countryCode: user.countryCode || 'NG',
+        location: user.location,
         role: user.role,
         profileImage: user.profileImage,
         emailVerified: user.emailVerified,
         accountStatus: user.accountStatus,
+        influencerVerificationStatus: user.influencerVerificationStatus || profile?.verificationStatus || 'pending',
+        termsAccepted: user.termsAccepted,
         profile,
       },
     });
@@ -372,41 +578,60 @@ const getMe = async (req, res, next) => {
 };
 
 /**
- * @desc    Forgot Password - initiates secure single-use token recovery
+ * @desc    Verify user email via token (Preserved for compatibility)
+ * @route   POST /api/auth/verify-email
+ * @access  Public
+ */
+const verifyEmail = async (req, res, next) => {
+  res.status(200).json({
+    success: true,
+    message: 'Email verification is no longer required on MEDIOVA. You can log in directly.',
+  });
+};
+
+/**
+ * @desc    Resend verification email (Preserved for compatibility)
+ * @route   POST /api/auth/resend-verification
+ * @access  Public
+ */
+const resendVerification = async (req, res, next) => {
+  res.status(200).json({
+    success: true,
+    message: 'Email verification is no longer required on MEDIOVA. You can log in directly.',
+  });
+};
+
+/**
+ * @desc    Forgot password
  * @route   POST /api/auth/forgot-password
  * @access  Public
  */
 const forgotPassword = async (req, res, next) => {
   try {
     const { email } = req.body;
-
     if (!email) {
-      return res.status(400).json({
-        success: false,
-        message: 'Please provide your account email address.',
+      return res.status(400).json({ success: false, message: 'Please provide an email address' });
+    }
+
+    const normalizedEmail = email.trim().toLowerCase();
+    const user = await User.findOne({ email: normalizedEmail });
+
+    if (!user) {
+      return res.status(200).json({
+        success: true,
+        message: 'If an account exists with this email, a reset link will be sent.',
       });
     }
 
-    const normalizedEmail = String(email).trim().toLowerCase();
-    const user = await User.findOne({ email: normalizedEmail });
+    const resetToken = crypto.randomBytes(32).toString('hex');
+    user.resetPasswordToken = crypto.createHash('sha256').update(resetToken).digest('hex');
+    user.resetPasswordExpires = Date.now() + 60 * 60 * 1000; // 1 hour
+    await user.save();
 
-    // Always proceed with a generic response to prevent account enumeration
-    if (user) {
-      // Invalidate any existing reset tokens
-      await VerificationToken.deleteMany({ userId: user._id, type: 'password_reset' });
+    const clientUrl = getClientUrl();
+    const resetUrl = `${clientUrl}/reset-password?token=${resetToken}&email=${encodeURIComponent(user.email)}`;
 
-      // Generate cryptographically secure 32-byte hex token
-      const rawToken = crypto.randomBytes(32).toString('hex');
-
-      await VerificationToken.create({
-        userId: user._id,
-        token: rawToken,
-        type: 'password_reset',
-        expiresAt: new Date(Date.now() + 60 * 60 * 1000), // 1 hour expiry
-      });
-
-      const clientUrl = getClientUrl();
-      const resetUrl = `${clientUrl}/reset-password?token=${rawToken}`;
+    try {
       const emailContent = emailTemplates.passwordReset({
         name: user.name,
         resetUrl,
@@ -418,12 +643,13 @@ const forgotPassword = async (req, res, next) => {
         html: emailContent.html,
         text: emailContent.text,
       });
+    } catch (emailErr) {
+      console.error('[forgotPassword] Error sending reset email:', emailErr.message);
     }
 
     res.status(200).json({
       success: true,
-      message:
-        'If an account with that email address exists in our system, you will receive password reset instructions shortly.',
+      message: 'If an account exists with this email, a reset link will be sent.',
     });
   } catch (error) {
     next(error);
@@ -431,7 +657,7 @@ const forgotPassword = async (req, res, next) => {
 };
 
 /**
- * @desc    Reset Password with token & complexity verification
+ * @desc    Reset password
  * @route   POST /api/auth/reset-password
  * @access  Public
  */
@@ -446,48 +672,28 @@ const resetPassword = async (req, res, next) => {
       });
     }
 
-    // Backend password complexity enforcement
-    if (
-      password.length < 8 ||
-      !/[A-Z]/.test(password) ||
-      !/[a-z]/.test(password) ||
-      !/[0-9]/.test(password) ||
-      !/[!@#$%^&*(),.?":{}|<>]/.test(password)
-    ) {
-      return res.status(400).json({
-        success: false,
-        message:
-          'New password must be at least 8 characters long and contain at least one uppercase letter, one lowercase letter, one number, and one special character.',
-      });
-    }
+    const hashedToken = crypto.createHash('sha256').update(token).digest('hex');
 
-    const resetToken = await VerificationToken.findOne({
-      token: String(token).trim(),
-      type: 'password_reset',
-      expiresAt: { $gt: Date.now() },
+    const user = await User.findOne({
+      resetPasswordToken: hashedToken,
+      resetPasswordExpires: { $gt: Date.now() },
     });
 
-    if (!resetToken) {
+    if (!user) {
       return res.status(400).json({
         success: false,
-        message: 'Invalid or expired password reset link. Please request a new one.',
+        message: 'Invalid or expired password reset token.',
       });
-    }
-
-    const user = await User.findById(resetToken.userId);
-    if (!user) {
-      return res.status(404).json({ success: false, message: 'User account not found.' });
     }
 
     user.password = password;
+    user.resetPasswordToken = undefined;
+    user.resetPasswordExpires = undefined;
     await user.save();
-
-    // Single-use token invalidation
-    await VerificationToken.deleteMany({ userId: user._id, type: 'password_reset' });
 
     res.status(200).json({
       success: true,
-      message: 'Password reset successfully! You can now log in with your new credentials.',
+      message: 'Password reset successful. You can now log in with your new password.',
     });
   } catch (error) {
     next(error);
@@ -495,51 +701,54 @@ const resetPassword = async (req, res, next) => {
 };
 
 /**
- * @desc    Register Admin (Protected by ADMIN_INVITE_SECRET)
+ * @desc    Register admin account
  * @route   POST /api/auth/admin-register
- * @access  Restricted
+ * @access  Public (Secret Protected)
  */
 const registerAdmin = async (req, res, next) => {
   try {
-    const { name, email, password, inviteSecret } = req.body;
+    const { name, email, password, adminSecret } = req.body;
 
-    const configuredSecret = process.env.ADMIN_INVITE_SECRET || 'DOPTV_ADMIN_ACCESS_2026';
-
-    if (!inviteSecret || inviteSecret !== configuredSecret) {
+    const expectedSecret = process.env.ADMIN_INVITE_SECRET || 'DOPTV_ADMIN_ACCESS_2026';
+    if (!adminSecret || adminSecret !== expectedSecret) {
       return res.status(403).json({
         success: false,
-        message: 'Unauthorized: Invalid Admin Registration Secret.',
+        message: 'Invalid administrative invitation secret.',
       });
     }
 
-    const existingUser = await User.findOne({ email: email.toLowerCase() });
-    if (existingUser) {
+    const normalizedEmail = (email || '').trim().toLowerCase();
+    const existing = await User.findOne({ email: normalizedEmail });
+    if (existing) {
       return res.status(400).json({
         success: false,
-        message: 'User with this email already exists.',
+        message: 'An account with this email already exists.',
       });
     }
 
-    const admin = await User.create({
-      name,
-      email: email.toLowerCase(),
+    const adminUser = await User.create({
+      name: (name || 'MEDIOVA Admin').trim(),
+      email: normalizedEmail,
       password,
       role: 'admin',
+      termsAccepted: true,
+      termsAcceptedVersion: '2.0',
+      termsAcceptedAt: new Date(),
       emailVerified: true,
       accountStatus: 'active',
     });
 
-    const token = generateToken(admin._id, admin.role);
+    const token = generateToken(adminUser._id, 'admin');
 
     res.status(201).json({
       success: true,
-      message: 'Admin account created successfully.',
+      message: 'Administrative account registered successfully.',
       token,
       user: {
-        id: admin._id,
-        name: admin.name,
-        email: admin.email,
-        role: admin.role,
+        id: adminUser._id,
+        name: adminUser.name,
+        email: adminUser.email,
+        role: adminUser.role,
       },
     });
   } catch (error) {
@@ -549,6 +758,7 @@ const registerAdmin = async (req, res, next) => {
 
 module.exports = {
   register,
+  googleAuth,
   verifyEmail,
   resendVerification,
   login,

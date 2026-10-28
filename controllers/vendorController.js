@@ -7,9 +7,11 @@ const Category = require('../models/Category');
 const ReachPackage = require('../models/ReachPackage');
 const AdminSettings = require('../models/AdminSettings');
 const RefundRequest = require('../models/RefundRequest');
+const Payment = require('../models/Payment');
 const { sendEmail } = require('../config/email');
 const emailTemplates = require('../utils/emailTemplates');
 const { processUploadedFile } = require('../middleware/upload');
+const { normalizePhoneNumber, isValidPhoneNumber, getCountryMeta } = require('../utils/locations');
 
 // Generate unique order number
 const generateOrderNumber = () => {
@@ -29,7 +31,8 @@ const getMyProfile = async (req, res, next) => {
     if (!profile) {
       return res.status(404).json({ success: false, message: 'Vendor profile not found' });
     }
-    res.status(200).json({ success: true, profile });
+    const user = await User.findById(req.user._id).select('name email phone whatsappNumber country countryCode location');
+    res.status(200).json({ success: true, profile, user });
   } catch (error) {
     next(error);
   }
@@ -48,20 +51,52 @@ const updateProfile = async (req, res, next) => {
       contactPerson,
       businessCategory,
       description,
+      whatsappNumber,
       phone,
-      whatsapp,
-      state,
-      city,
-      lga,
+      country,
+      region,
+      subDivision,
       area,
+      state,
+      lga,
       businessAddress,
       website,
       socialLinks,
     } = req.body;
 
-    if (name) {
-      await User.findByIdAndUpdate(req.user._id, { name });
+    const rawPhone = whatsappNumber || phone;
+    let normalizedWhatsapp = null;
+    if (rawPhone) {
+      normalizedWhatsapp = normalizePhoneNumber(rawPhone);
+      if (!isValidPhoneNumber(normalizedWhatsapp)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Please enter a valid WhatsApp phone number in international format.',
+        });
+      }
     }
+
+    const userUpdates = {};
+    if (name) userUpdates.name = name.trim();
+    if (normalizedWhatsapp) {
+      userUpdates.whatsappNumber = normalizedWhatsapp;
+      userUpdates.phone = normalizedWhatsapp;
+    }
+    if (country) userUpdates.country = country;
+    if (region || subDivision || area) {
+      userUpdates.location = {
+        region: region || state || '',
+        subDivision: subDivision || lga || '',
+        area: area || '',
+      };
+    }
+
+    if (Object.keys(userUpdates).length > 0) {
+      await User.findByIdAndUpdate(req.user._id, userUpdates);
+    }
+
+    const resolvedRegion = region || state;
+    const resolvedSub = subDivision || lga;
 
     const profile = await VendorProfile.findOneAndUpdate(
       { userId: req.user._id },
@@ -70,11 +105,9 @@ const updateProfile = async (req, res, next) => {
         ...(contactPerson && { contactPerson }),
         ...(businessCategory && { businessCategory }),
         ...(description !== undefined && { description }),
-        ...(phone && { phone }),
-        ...(whatsapp && { whatsapp }),
-        ...(state && { state }),
-        ...(city !== undefined && { city }),
-        ...(lga !== undefined && { lga }),
+        ...(normalizedWhatsapp && { phone: normalizedWhatsapp, whatsapp: normalizedWhatsapp }),
+        ...(resolvedRegion && { state: resolvedRegion }),
+        ...(resolvedSub !== undefined && { city: resolvedSub, lga: resolvedSub }),
         ...(area !== undefined && { area }),
         ...(businessAddress !== undefined && { businessAddress }),
         ...(website !== undefined && { website }),
@@ -85,7 +118,7 @@ const updateProfile = async (req, res, next) => {
 
     res.status(200).json({
       success: true,
-      message: 'Business profile updated',
+      message: 'Business profile updated successfully',
       profile,
     });
   } catch (error) {
@@ -94,7 +127,7 @@ const updateProfile = async (req, res, next) => {
 };
 
 /**
- * @desc    Create advertising order (multi-step form submission)
+ * @desc    Create advertising campaign
  * @route   POST /api/vendors/campaigns
  * @access  Private (Vendor)
  */
@@ -107,11 +140,16 @@ const createCampaign = async (req, res, next) => {
       objective,
       adCopy,
       callToAction,
+      targetCountry = 'Nigeria',
+      targetRegion = '',
+      targetAreas,
+      isNationwide,
       targetLocation,
       targetRadius,
       reachPackageId,
       requiredViews,
       price,
+      currency = 'NGN',
       duration,
       instructions,
     } = req.body;
@@ -119,67 +157,37 @@ const createCampaign = async (req, res, next) => {
     if (!title || !description || !category || !objective) {
       return res.status(400).json({
         success: false,
-        message: 'Campaign name, description, category, and objective are all required.',
+        message: 'Campaign title, description, category, and objective are all required.',
       });
     }
 
-    // Parse targetLocation from JSON string, object, or multipart bracket notation
-    let parsedLocation = {};
-    if (typeof targetLocation === 'string') {
+    // Load admin configured maximum areas limit
+    const settings = await AdminSettings.findOne();
+    const maxCampaignAreas = settings?.maxCampaignAreas || 15;
+
+    // Parse target areas array
+    let parsedAreas = [];
+    if (typeof targetAreas === 'string') {
       try {
-        parsedLocation = JSON.parse(targetLocation);
+        parsedAreas = JSON.parse(targetAreas);
       } catch {
-        parsedLocation = { state: targetLocation };
+        parsedAreas = targetAreas.split(',').map((s) => s.trim()).filter(Boolean);
       }
-    } else if (targetLocation && typeof targetLocation === 'object') {
-      parsedLocation = targetLocation;
-    } else {
-      parsedLocation = {
-        state: req.body['targetLocation[state]'] || req.body.state || '',
-        targetStates: req.body['targetLocation[targetStates]'] || req.body.targetStates || [],
-        isNationwide:
-          req.body['targetLocation[isNationwide]'] === true ||
-          req.body['targetLocation[isNationwide]'] === 'true' ||
-          req.body.isNationwide === true ||
-          req.body.isNationwide === 'true',
-        city: req.body['targetLocation[city]'] || req.body.city || '',
-        lga: req.body['targetLocation[lga]'] || req.body.lga || '',
-        area: req.body['targetLocation[area]'] || req.body.area || 'General',
-        businessAddress: req.body['targetLocation[businessAddress]'] || req.body.businessAddress || '',
-      };
+    } else if (Array.isArray(targetAreas)) {
+      parsedAreas = targetAreas;
     }
 
-    // Normalize targetStates array if sent as string or array
-    if (typeof parsedLocation.targetStates === 'string') {
-      try {
-        parsedLocation.targetStates = JSON.parse(parsedLocation.targetStates);
-      } catch {
-        parsedLocation.targetStates = parsedLocation.targetStates
-          .split(',')
-          .map((s) => s.trim())
-          .filter(Boolean);
-      }
+    const nationwideFlag = isNationwide === true || isNationwide === 'true';
+
+    // Backend enforcement of administrator-configured maximum local areas
+    if (!nationwideFlag && parsedAreas.length > maxCampaignAreas) {
+      return res.status(400).json({
+        success: false,
+        message: `Maximum allowed targeting areas is ${maxCampaignAreas}. You selected ${parsedAreas.length} areas.`,
+      });
     }
 
-    if (!Array.isArray(parsedLocation.targetStates)) {
-      parsedLocation.targetStates = parsedLocation.state ? [parsedLocation.state] : [];
-    }
-
-    if (parsedLocation.isNationwide) {
-      parsedLocation.targetStates = ['Nationwide'];
-      parsedLocation.state = 'Nationwide';
-    } else if (parsedLocation.targetStates.length > 0) {
-      parsedLocation.state = parsedLocation.state || parsedLocation.targetStates[0];
-    } else if (parsedLocation.state) {
-      parsedLocation.targetStates = [parsedLocation.state];
-    } else {
-      parsedLocation.state = 'Lagos';
-      parsedLocation.targetStates = ['Lagos'];
-    }
-
-    parsedLocation.area = parsedLocation.area || 'General';
-
-    // Parse callToAction
+    // Call to Action
     let parsedCta = { actionType: 'WhatsApp', targetValue: '' };
     if (typeof callToAction === 'string') {
       try {
@@ -192,11 +200,6 @@ const createCampaign = async (req, res, next) => {
         actionType: callToAction.actionType || 'WhatsApp',
         targetValue: callToAction.targetValue || '',
       };
-    } else if (req.body['callToAction[actionType]'] || req.body['callToAction[targetValue]']) {
-      parsedCta = {
-        actionType: req.body['callToAction[actionType]'] || 'WhatsApp',
-        targetValue: req.body['callToAction[targetValue]'] || '',
-      };
     }
 
     if (!requiredViews || Number(requiredViews) < 1000) {
@@ -206,20 +209,53 @@ const createCampaign = async (req, res, next) => {
       });
     }
 
-    // Handle media upload if file present
-    let mediaData = { url: '', publicId: '', type: 'image' };
-    if (req.file) {
-      const uploaded = await processUploadedFile(req.file, 'campaign_media');
-      if (uploaded) {
-        mediaData = {
-          url: uploaded.url,
-          publicId: uploaded.publicId,
-          type: uploaded.resourceType === 'video' ? 'video' : 'image',
-        };
+    // Handle media uploads: supports multiple advert images and payment receipt
+    const rawMediaFiles = [];
+    if (req.files) {
+      if (req.files.media) {
+        if (Array.isArray(req.files.media)) rawMediaFiles.push(...req.files.media);
+        else rawMediaFiles.push(req.files.media);
+      }
+      if (req.files.mediaFiles) {
+        if (Array.isArray(req.files.mediaFiles)) rawMediaFiles.push(...req.files.mediaFiles);
+        else rawMediaFiles.push(req.files.mediaFiles);
+      }
+    }
+    if (req.file) rawMediaFiles.push(req.file);
+
+    const mediaList = [];
+    for (const file of rawMediaFiles) {
+      const uploadedMedia = await processUploadedFile(file, 'campaign_media');
+      if (uploadedMedia) {
+        mediaList.push({
+          url: uploadedMedia.url,
+          publicId: uploadedMedia.publicId,
+          type: uploadedMedia.resourceType === 'video' ? 'video' : 'image',
+        });
+      }
+    }
+    const primaryMedia = mediaList[0] || { url: '', publicId: '', type: 'image' };
+
+    let receiptData = null;
+    if (req.files) {
+      const receiptFile = req.files.receipt
+        ? req.files.receipt[0]
+        : req.files.receiptFile
+        ? req.files.receiptFile[0]
+        : null;
+
+      if (receiptFile) {
+        const uploadedReceipt = await processUploadedFile(receiptFile, 'payment_receipts');
+        if (uploadedReceipt) {
+          receiptData = {
+            url: uploadedReceipt.url,
+            publicId: uploadedReceipt.publicId,
+            uploadedAt: new Date(),
+          };
+        }
       }
     }
 
-    // Lookup reach package for name if provided
     let reachPackageName = '';
     if (reachPackageId) {
       const pkg = await ReachPackage.findById(reachPackageId);
@@ -227,6 +263,10 @@ const createCampaign = async (req, res, next) => {
     }
 
     const orderNumber = generateOrderNumber();
+    const resolvedCountryMeta = getCountryMeta(targetCountry);
+
+    const initialStatus = receiptData ? 'Payment Submitted' : 'Awaiting Payment';
+    const initialPaymentStatus = receiptData ? 'submitted' : 'unpaid';
 
     const campaign = await Campaign.create({
       orderNumber,
@@ -235,55 +275,65 @@ const createCampaign = async (req, res, next) => {
       description: description.trim(),
       category: category.trim(),
       objective: objective.trim(),
-      media: mediaData,
+      media: primaryMedia,
+      mediaList: mediaList,
       adCopy: adCopy || '',
       callToAction: parsedCta,
+      targetCountry: resolvedCountryMeta.name,
+      targetCountryCode: resolvedCountryMeta.code,
+      targetRegion: targetRegion || 'General',
+      targetAreas: parsedAreas,
+      isNationwide: nationwideFlag,
       targetLocation: {
-        state: parsedLocation.state,
-        targetStates: parsedLocation.targetStates,
-        isNationwide: Boolean(parsedLocation.isNationwide),
-        city: parsedLocation.city || '',
-        lga: parsedLocation.lga || '',
-        area: parsedLocation.area || 'General',
-        businessAddress: parsedLocation.businessAddress || '',
+        state: nationwideFlag ? 'Nationwide' : targetRegion || 'General',
+        targetStates: nationwideFlag ? ['Nationwide'] : [targetRegion || 'General'],
+        isNationwide: nationwideFlag,
+        city: parsedAreas[0] || '',
+        lga: parsedAreas[0] || '',
+        area: parsedAreas.join(', ') || 'General',
       },
       targetRadius: targetRadius || '',
       reachPackageId: reachPackageId || null,
       reachPackageName,
       requiredViews: Number(requiredViews),
       price: Number(price) || 0,
+      currency: currency || settings?.bankDetails?.currency || 'NGN',
       duration: duration || '24 Hours',
       instructions: instructions || '',
-      status: 'Awaiting Payment',
-      paymentStatus: 'unpaid',
+      paymentReceipt: receiptData || undefined,
+      status: initialStatus,
+      paymentStatus: initialPaymentStatus,
     });
 
-    // In-app notification for vendor
+    // If receipt was attached at creation, create persistent Payment record
+    if (receiptData) {
+      await Payment.create({
+        vendorId: req.user._id,
+        campaignId: campaign._id,
+        amount: campaign.price,
+        currency: campaign.currency,
+        receiptUrl: receiptData.url,
+        receiptPublicId: receiptData.publicId,
+        status: 'submitted',
+      });
+    }
+
+    // Notification for vendor
     await Notification.create({
       userId: req.user._id,
-      title: 'Advertising Order Submitted!',
-      message: `Your order #${orderNumber} for "${title}" has been received. Please contact Admin on WhatsApp to complete payment.`,
+      title: 'Campaign Order Created',
+      message: `Your advertising campaign #${orderNumber} for "${title}" has been created successfully.`,
       type: 'info',
       link: `/vendor/orders/${campaign._id}`,
     });
 
-    // Fetch settings for WhatsApp message & number
-    const settings = await AdminSettings.findOne().select('whatsappNumber defaultWhatsAppMessage');
-    const waNumber = (settings?.whatsappNumber || '+2348012345678').replace(/[^0-9]/g, '');
-    const waMsg = encodeURIComponent(
-      (settings?.defaultWhatsAppMessage || 'Hello MEDIOVA Team, I have submitted advertising order #{ORDER_NUMBER} for "{TITLE}" and would like to complete payment.')
-        .replace('{ORDER_NUMBER}', orderNumber)
-        .replace('{TITLE}', title)
-    );
-    const whatsappUrl = `https://wa.me/${waNumber}?text=${waMsg}`;
-
-    // Notify all admins
+    // Notify admins
     const admins = await User.find({ role: 'admin' });
     for (const admin of admins) {
       await Notification.create({
         userId: admin._id,
-        title: 'New Advertising Order Received',
-        message: `Order #${orderNumber} submitted by ${req.user.name} for "${title}". Awaiting payment confirmation.`,
+        title: 'New Campaign Order Submitted',
+        message: `Order #${orderNumber} submitted by ${req.user.name}. Status: ${initialStatus}.`,
         type: 'campaign',
         link: `/admin/campaigns/${campaign._id}`,
       });
@@ -291,9 +341,8 @@ const createCampaign = async (req, res, next) => {
 
     res.status(201).json({
       success: true,
-      message: 'Advertising order submitted successfully!',
+      message: 'Campaign order submitted successfully!',
       campaign,
-      whatsappUrl,
       orderNumber,
     });
   } catch (error) {
@@ -302,30 +351,195 @@ const createCampaign = async (req, res, next) => {
 };
 
 /**
- * @desc    Get all vendor's campaigns/orders
+ * @desc    Upload payment receipt image for a campaign
+ * @route   POST /api/vendors/campaigns/:id/receipt
+ * @access  Private (Vendor)
+ */
+const submitPaymentReceipt = async (req, res, next) => {
+  try {
+    const file = req.file || (req.files && req.files.receipt && req.files.receipt[0]);
+
+    if (!file) {
+      return res.status(400).json({
+        success: false,
+        message: 'Please select an image file of your payment receipt/transfer confirmation.',
+      });
+    }
+
+    const campaign = await Campaign.findOne({
+      _id: req.params.id,
+      vendorId: req.user._id,
+    });
+
+    if (!campaign) {
+      return res.status(404).json({ success: false, message: 'Campaign not found' });
+    }
+
+    const uploaded = await processUploadedFile(file, 'payment_receipts');
+    if (!uploaded || !uploaded.url) {
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to upload receipt image. Please try again.',
+      });
+    }
+
+    campaign.paymentReceipt = {
+      url: uploaded.url,
+      publicId: uploaded.publicId,
+      uploadedAt: new Date(),
+    };
+    campaign.paymentStatus = 'submitted';
+    campaign.status = 'Payment Submitted';
+    await campaign.save();
+
+    // Create or update payment record
+    let payment = await Payment.findOne({ campaignId: campaign._id });
+    if (payment) {
+      payment.receiptUrl = uploaded.url;
+      payment.receiptPublicId = uploaded.publicId;
+      payment.status = 'submitted';
+      payment.submittedAt = new Date();
+      await payment.save();
+    } else {
+      payment = await Payment.create({
+        vendorId: req.user._id,
+        campaignId: campaign._id,
+        amount: campaign.price,
+        currency: campaign.currency,
+        receiptUrl: uploaded.url,
+        receiptPublicId: uploaded.publicId,
+        status: 'submitted',
+      });
+    }
+
+    // Notify admins
+    const admins = await User.find({ role: 'admin' });
+    for (const admin of admins) {
+      await Notification.create({
+        userId: admin._id,
+        title: 'Payment Receipt Uploaded',
+        message: `Vendor uploaded payment receipt for Order #${campaign.orderNumber} (${campaign.currency} ${Number(campaign.price).toLocaleString()}).`,
+        type: 'payment',
+        link: `/admin/campaigns/${campaign._id}`,
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: 'Payment receipt uploaded successfully! Admin will verify payment shortly.',
+      campaign,
+      payment,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * @desc    Vendor review of completed work (Accept or Raise Issue)
+ * @route   PUT /api/vendors/campaigns/:id/review-work
+ * @access  Private (Vendor)
+ */
+const reviewCompletedWork = async (req, res, next) => {
+  try {
+    const { action, comments = '' } = req.body;
+
+    if (!['accept', 'raise_issue'].includes(action)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid action. Must be 'accept' or 'raise_issue'.",
+      });
+    }
+
+    const campaign = await Campaign.findOne({
+      _id: req.params.id,
+      vendorId: req.user._id,
+    });
+
+    if (!campaign) {
+      return res.status(404).json({ success: false, message: 'Campaign not found' });
+    }
+
+    if (action === 'accept') {
+      campaign.status = 'Completed';
+      campaign.completedWork.vendorReviewStatus = 'accepted';
+      campaign.completedWork.vendorReviewComment = comments;
+      campaign.completedWork.vendorReviewedAt = new Date();
+      campaign.completedWork.history.push({
+        action: 'vendor_accepted',
+        notes: comments || 'Vendor accepted completed work without objections.',
+        timestamp: new Date(),
+        by: req.user._id,
+      });
+    } else {
+      if (!comments.trim()) {
+        return res.status(400).json({
+          success: false,
+          message: 'Please provide detailed notes explaining the issue or revision needed.',
+        });
+      }
+      campaign.status = 'Issue Raised';
+      campaign.completedWork.vendorReviewStatus = 'issue_raised';
+      campaign.completedWork.vendorReviewComment = comments;
+      campaign.completedWork.vendorReviewedAt = new Date();
+      campaign.completedWork.history.push({
+        action: 'vendor_issue_raised',
+        notes: comments,
+        timestamp: new Date(),
+        by: req.user._id,
+      });
+    }
+
+    await campaign.save();
+
+    // Notify admins
+    const admins = await User.find({ role: 'admin' });
+    for (const admin of admins) {
+      await Notification.create({
+        userId: admin._id,
+        title: action === 'accept' ? 'Completed Work Accepted' : 'Vendor Raised Issue on Completed Work',
+        message: `Order #${campaign.orderNumber}: ${action === 'accept' ? 'Vendor approved completed work.' : `Vendor raised issue: "${comments.slice(0, 80)}..."`}`,
+        type: action === 'accept' ? 'campaign' : 'warning',
+        link: `/admin/campaigns/${campaign._id}`,
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: action === 'accept' ? 'Work accepted successfully! Thank you for using MEDIOVA.' : 'Issue recorded. Admin will review and address your notes.',
+      campaign,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * @desc    Get all campaigns for logged in vendor
  * @route   GET /api/vendors/campaigns
  * @access  Private (Vendor)
  */
 const getMyCampaigns = async (req, res, next) => {
   try {
-    const { status, page = 1, limit = 10 } = req.query;
+    const { status, page = 1, limit = 20 } = req.query;
     const query = { vendorId: req.user._id };
+
     if (status && status !== 'all') {
       query.status = status;
     }
 
-    const skip = (Number(page) - 1) * Number(limit);
     const total = await Campaign.countDocuments(query);
     const campaigns = await Campaign.find(query)
       .sort({ createdAt: -1 })
-      .skip(skip)
+      .skip((page - 1) * limit)
       .limit(Number(limit));
 
     res.status(200).json({
       success: true,
+      count: campaigns.length,
       total,
-      pages: Math.ceil(total / Number(limit)),
-      page: Number(page),
+      totalPages: Math.ceil(total / limit),
+      currentPage: Number(page),
       campaigns,
     });
   } catch (error) {
@@ -334,7 +548,7 @@ const getMyCampaigns = async (req, res, next) => {
 };
 
 /**
- * @desc    Get single campaign details with gig stats
+ * @desc    Get specific campaign details for vendor
  * @route   GET /api/vendors/campaigns/:id
  * @access  Private (Vendor)
  */
@@ -349,30 +563,17 @@ const getCampaignDetails = async (req, res, next) => {
       return res.status(404).json({ success: false, message: 'Campaign not found' });
     }
 
-    // Get gig summary for this campaign (no influencer identities exposed to vendor)
-    const gigStats = await Gig.aggregate([
-      { $match: { campaignId: campaign._id } },
-      {
-        $group: {
-          _id: '$status',
-          count: { $sum: 1 },
-          totalViews: { $sum: '$assignedViews' },
-        },
-      },
-    ]);
+    const gigs = await Gig.find({ campaignId: campaign._id })
+      .select('gigNumber assignedViews reward status')
+      .populate('influencerId', 'name');
 
-    const totalInfluencers = await Gig.countDocuments({ campaignId: campaign._id });
-    const completedGigs = await Gig.countDocuments({ campaignId: campaign._id, status: 'approved' });
+    const payment = await Payment.findOne({ campaignId: campaign._id });
 
     res.status(200).json({
       success: true,
       campaign,
-      analytics: {
-        totalInfluencers,
-        completedGigs,
-        completionRate: totalInfluencers > 0 ? Math.round((completedGigs / totalInfluencers) * 100) : 0,
-        gigStats,
-      },
+      gigs,
+      payment,
     });
   } catch (error) {
     next(error);
@@ -380,25 +581,57 @@ const getCampaignDetails = async (req, res, next) => {
 };
 
 /**
- * @desc    Get available categories and packages for order form
+ * @desc    Get campaign order options (categories, reach packages, payment info, settings)
  * @route   GET /api/vendors/order-options
  * @access  Private (Vendor)
  */
 const getOrderOptions = async (req, res, next) => {
   try {
-    const categories = await Category.find({ status: 'active', type: 'ad' }).sort({ displayOrder: 1 });
-    const objectives = await Category.find({ status: 'active', type: 'objective' }).sort({ displayOrder: 1 });
-    const packages = await ReachPackage.find({ status: 'active' }).sort({ displayOrder: 1 });
-    const settings = await AdminSettings.findOne().select('availableDurations whatsappNumber manualPaymentInstructions');
+    // 1. Fetch active advertising categories created by Admin (type: 'ad' or unconstrained)
+    let categories = await Category.find({
+      status: { $ne: 'inactive' },
+      $or: [
+        { type: 'ad' },
+        { type: { $exists: false } },
+        { type: null }
+      ]
+    }).sort({ displayOrder: 1, name: 1 });
+
+    // Fallback: If no 'ad' specific categories exist, return all active categories
+    if (!categories || categories.length === 0) {
+      categories = await Category.find({ status: { $ne: 'inactive' } }).sort({ displayOrder: 1, name: 1 });
+    }
+
+    // 2. Fetch active campaign objectives created by Admin (type: 'objective')
+    const objectives = await Category.find({
+      type: 'objective',
+      status: { $ne: 'inactive' }
+    }).sort({ displayOrder: 1, name: 1 });
+
+    // 3. Fetch active reach packages created by Admin
+    const packages = await ReachPackage.find({
+      status: { $ne: 'inactive' }
+    }).sort({ displayOrder: 1, minimumViews: 1, price: 1 });
+
+    const settings = await AdminSettings.findOne();
 
     res.status(200).json({
       success: true,
       categories,
       objectives,
       packages,
-      durations: settings?.availableDurations || ['24 Hours', '3 Days', '7 Days'],
-      adminWhatsapp: settings?.whatsappNumber || '+2348012345678',
-      paymentInstructions: settings?.manualPaymentInstructions || '',
+      durations: settings?.availableDurations || ['24 Hours (1 Day)', '48 Hours (2 Days)', '3 Days', '7 Days', 'Custom Duration'],
+      paymentSettings: {
+        bankName: settings?.bankDetails?.bankName || 'Zenith Bank',
+        accountName: settings?.bankDetails?.accountName || 'MEDIOVA Media Brokerage Ltd',
+        accountNumber: settings?.bankDetails?.accountNumber || '1012345678',
+        currency: settings?.bankDetails?.currency || 'NGN',
+        sortCode: settings?.bankDetails?.sortCode || '',
+        swiftBic: settings?.bankDetails?.swiftBic || '',
+        instructions: settings?.manualPaymentInstructions || 'Please make a direct transfer to our brokerage account below and upload your payment receipt directly on this page for admin verification.',
+        whatsappNumber: settings?.whatsappNumber || '+2348012345678',
+      },
+      maxCampaignAreas: settings?.maxCampaignAreas || 15,
     });
   } catch (error) {
     next(error);
@@ -406,119 +639,60 @@ const getOrderOptions = async (req, res, next) => {
 };
 
 /**
- * @desc    Submit a refund request for an eligible paid campaign
+ * @desc    Submit refund request
  * @route   POST /api/vendors/refunds
  * @access  Private (Vendor)
  */
 const submitRefundRequest = async (req, res, next) => {
   try {
-    const { campaignId, reason, description, bankDetails } = req.body;
+    const { campaignId, reason, bankDetails, amount } = req.body;
 
-    if (!campaignId || !reason || !description) {
+    if (!campaignId || !reason || !bankDetails) {
       return res.status(400).json({
         success: false,
-        message: 'Campaign ID, refund reason, and detailed explanation are required.',
-      });
-    }
-
-    if (
-      !bankDetails ||
-      !bankDetails.accountName ||
-      !bankDetails.bankName ||
-      !bankDetails.accountNumber
-    ) {
-      return res.status(400).json({
-        success: false,
-        message: 'Complete bank account details (Name, Bank, 10-digit NUBAN) are required for refund transfer.',
-      });
-    }
-
-    // Clean and validate 10-digit Nigerian NUBAN
-    const cleanAccountNum = String(bankDetails.accountNumber).replace(/[^0-9]/g, '');
-    if (cleanAccountNum.length !== 10) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid account number. Nigerian NUBAN accounts must be exactly 10 digits.',
+        message: 'Campaign ID, detailed reason, and payout bank details are required.',
       });
     }
 
     const campaign = await Campaign.findOne({ _id: campaignId, vendorId: req.user._id });
     if (!campaign) {
-      return res.status(404).json({
-        success: false,
-        message: 'Campaign not found or does not belong to your account.',
-      });
-    }
-
-    if (campaign.paymentStatus !== 'confirmed') {
-      return res.status(400).json({
-        success: false,
-        message: 'Refunds can only be requested for campaigns with confirmed payment.',
-      });
-    }
-
-    if (campaign.status === 'Completed') {
-      return res.status(400).json({
-        success: false,
-        message: 'This campaign has already completed its reach delivery. For disputed results, please submit a formal complaint instead.',
-      });
-    }
-
-    // Check if an existing refund request is already active
-    const existingRefund = await RefundRequest.findOne({
-      campaignId: campaign._id,
-      status: { $in: ['Requested', 'Under Review', 'Approved', 'Processing', 'Refunded'] },
-    });
-
-    if (existingRefund) {
-      return res.status(400).json({
-        success: false,
-        message: `A refund request (#${existingRefund.refundNumber}) has already been submitted for this campaign (Status: ${existingRefund.status}).`,
-      });
+      return res.status(404).json({ success: false, message: 'Campaign not found' });
     }
 
     const refundNumber = `REF-${Date.now().toString(36).toUpperCase()}-${Math.random().toString(36).substring(2, 5).toUpperCase()}`;
 
     const refund = await RefundRequest.create({
       refundNumber,
-      campaignId: campaign._id,
+      campaignId,
       vendorId: req.user._id,
-      orderNumber: campaign.orderNumber,
-      amount: campaign.price,
+      amount: Number(amount) || campaign.price,
       reason,
-      description: description.trim(),
-      bankDetails: {
-        accountName: bankDetails.accountName.trim(),
-        bankName: bankDetails.bankName.trim(),
-        accountNumber: cleanAccountNum,
-      },
-      status: 'Requested',
+      bankDetails,
+      status: 'pending',
     });
 
-    // Notify vendor
     await Notification.create({
       userId: req.user._id,
       title: 'Refund Request Received',
-      message: `Your refund request #${refundNumber} for order #${campaign.orderNumber} (₦${Number(campaign.price).toLocaleString()}) has been received and is under administrative review.`,
+      message: `Your refund request #${refundNumber} for order #${campaign.orderNumber} has been received and is under administrative review.`,
       type: 'info',
       link: `/vendor/orders/${campaign._id}`,
     });
 
-    // Notify admins
     const admins = await User.find({ role: 'admin' });
     for (const admin of admins) {
       await Notification.create({
         userId: admin._id,
         title: 'New Refund Request Submitted',
-        message: `Refund #${refundNumber} submitted by ${req.user.name} for campaign "${campaign.title}" (₦${Number(campaign.price).toLocaleString()}).`,
+        message: `Refund #${refundNumber} submitted by ${req.user.name} for campaign "${campaign.title}".`,
         type: 'payment',
-        link: `/admin/orders/${campaign._id}`,
+        link: `/admin/refunds`,
       });
     }
 
     res.status(201).json({
       success: true,
-      message: 'Refund request submitted successfully. It will be reviewed by our finance team within 3-5 business days.',
+      message: 'Refund request submitted successfully.',
       refund,
     });
   } catch (error) {
@@ -551,6 +725,8 @@ module.exports = {
   getMyProfile,
   updateProfile,
   createCampaign,
+  submitPaymentReceipt,
+  reviewCompletedWork,
   getMyCampaigns,
   getCampaignDetails,
   getOrderOptions,

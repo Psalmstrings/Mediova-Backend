@@ -7,6 +7,8 @@ const {
   updateProfile,
   updateAvailability,
   updateBankDetails,
+  submitVerificationVideo,
+  getVerificationStatus,
   submitReachProof,
   getMyGigs,
   getGigDetails,
@@ -22,12 +24,20 @@ router.get('/profile', getMyProfile);
 router.put('/profile', updateProfile);
 router.patch('/availability', updateAvailability);
 router.put('/bank-details', updateBankDetails);
-router.post('/reach-proof', upload.array('proofImages', 5), submitReachProof);
+
+// Account Verification (Video Evidence)
+router.post('/verify-account', upload.single('video'), submitVerificationVideo);
+router.get('/verification-status', getVerificationStatus);
+
+// Reach Proof (compatibility)
+router.post('/reach-proof', upload.single('proof'), submitReachProof);
+
+// Gigs
 router.get('/gigs', getMyGigs);
 router.get('/gigs/:id', getGigDetails);
 router.put('/gigs/:id/accept', acceptGig);
 router.put('/gigs/:id/decline', declineGig);
-router.post('/gigs/:id/submit', upload.array('proofImages', 5), submitGigProof);
+router.post('/gigs/:id/submit', upload.single('video'), submitGigProof);
 router.get('/earnings', getMyEarnings);
 
 module.exports = router;
