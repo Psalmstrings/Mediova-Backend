@@ -69,57 +69,9 @@ const googleAuth = async (req, res, next) => {
     let user = await User.findOne({ $or: [{ googleId }, { email: normalizedEmail }] });
 
     if (user) {
-      // Multi-role enrollment & safe account switching
-      const existingRoles = Array.isArray(user.roles) && user.roles.length > 0 ? user.roles : [user.role];
-      if (!Array.isArray(user.roles) || user.roles.length === 0) {
-        user.roles = existingRoles;
-      }
-
-      // If user requested a specific marketplace role and is not an administrator
-      if (role && ['influencer', 'vendor'].includes(role) && user.role !== 'admin') {
-        if (!existingRoles.includes(role)) {
-          // Safely enroll user into the additional role without deleting existing data
-          user.roles = [...new Set([...existingRoles, role])];
-          user.role = role;
-
-          if (role === 'influencer') {
-            const existingInfProfile = await InfluencerProfile.findOne({ userId: user._id });
-            if (!existingInfProfile) {
-              await InfluencerProfile.create({
-                userId: user._id,
-                whatsappNumber: user.whatsappNumber || user.phone || '',
-                state: user.location?.region || 'General',
-                city: user.location?.subDivision || '',
-                lga: user.location?.subDivision || '',
-                area: user.location?.area || 'General',
-                verificationStatus: 'pending',
-              });
-            }
-            if (!user.influencerVerificationStatus || user.influencerVerificationStatus === 'none') {
-              user.influencerVerificationStatus = 'pending';
-            }
-          } else if (role === 'vendor') {
-            const existingVenProfile = await VendorProfile.findOne({ userId: user._id });
-            if (!existingVenProfile) {
-              await VendorProfile.create({
-                userId: user._id,
-                businessName: user.name,
-                contactPerson: user.name,
-                whatsapp: user.whatsappNumber || user.phone || '',
-                phone: user.phone || user.whatsappNumber || '',
-                state: user.location?.region || 'General',
-                city: user.location?.subDivision || '',
-                lga: user.location?.subDivision || '',
-                area: user.location?.area || '',
-                verificationStatus: 'verified',
-              });
-            }
-          }
-        } else if (user.role !== role) {
-          // User already possesses this enrolled role; switch active session role
-          user.role = role;
-        }
-      }
+      // Strict single-role policy: An existing user's role is permanent and cannot be modified.
+      // If an existing account belongs to a vendor, it strictly remains a vendor.
+      // If an existing account belongs to an influencer, it strictly remains an influencer.
 
       // Link googleId if missing
       if (!user.googleId) {
@@ -184,7 +136,6 @@ const googleAuth = async (req, res, next) => {
           countryCode: user.countryCode,
           location: user.location,
           role: user.role,
-          roles: user.roles || [user.role],
           profileImage: user.profileImage,
           emailVerified: user.emailVerified,
           accountStatus: user.accountStatus,
@@ -246,7 +197,6 @@ const googleAuth = async (req, res, next) => {
       googleId,
       profileImage: picture || '',
       role: ['influencer', 'vendor'].includes(role) ? role : 'influencer',
-      roles: [['influencer', 'vendor'].includes(role) ? role : 'influencer'],
       emailVerified: true,
       accountStatus: 'active',
       termsAccepted: true,
@@ -305,7 +255,6 @@ const googleAuth = async (req, res, next) => {
         countryCode: newUser.countryCode,
         location: newUser.location,
         role: newUser.role,
-        roles: newUser.roles || [newUser.role],
         profileImage: newUser.profileImage,
         emailVerified: true,
         accountStatus: newUser.accountStatus,
@@ -614,7 +563,6 @@ const getMe = async (req, res, next) => {
         countryCode: user.countryCode || 'NG',
         location: user.location,
         role: user.role,
-        roles: Array.isArray(user.roles) && user.roles.length > 0 ? user.roles : [user.role],
         profileImage: user.profileImage,
         emailVerified: user.emailVerified,
         accountStatus: user.accountStatus,
@@ -625,68 +573,6 @@ const getMe = async (req, res, next) => {
     });
   } catch (error) {
     next(error);
-  }
-};
-
-/**
- * @desc    Switch active session role (for multi-role enrolled users)
- * @route   POST /api/auth/switch-role
- * @access  Private
- */
-const switchRole = async (req, res, next) => {
-  try {
-    const { targetRole } = req.body;
-    if (!targetRole || !['influencer', 'vendor'].includes(targetRole)) {
-      return res.status(400).json({ success: false, message: 'Invalid target role specified.' });
-    }
-
-    const user = await User.findById(req.user._id);
-    if (!user) {
-      return res.status(404).json({ success: false, message: 'User not found.' });
-    }
-
-    const userRoles = Array.isArray(user.roles) && user.roles.length > 0 ? user.roles : [user.role];
-    if (!userRoles.includes(targetRole)) {
-      return res.status(403).json({ success: false, message: `You are not enrolled as a ${targetRole}.` });
-    }
-
-    user.role = targetRole;
-    await user.save();
-
-    let profile = null;
-    if (targetRole === 'influencer') {
-      profile = await InfluencerProfile.findOne({ userId: user._id });
-    } else if (targetRole === 'vendor') {
-      profile = await VendorProfile.findOne({ userId: user._id });
-    }
-
-    const token = generateToken(user._id, targetRole);
-
-    res.status(200).json({
-      success: true,
-      message: `Active session switched to ${targetRole}.`,
-      token,
-      user: {
-        id: user._id,
-        name: user.name,
-        email: user.email,
-        phone: user.whatsappNumber || user.phone,
-        whatsappNumber: user.whatsappNumber || user.phone,
-        country: user.country,
-        countryCode: user.countryCode,
-        location: user.location,
-        role: user.role,
-        roles: user.roles,
-        profileImage: user.profileImage,
-        emailVerified: user.emailVerified,
-        accountStatus: user.accountStatus,
-        influencerVerificationStatus: user.influencerVerificationStatus,
-        termsAccepted: user.termsAccepted,
-        profile,
-      },
-    });
-  } catch (err) {
-    next(err);
   }
 };
 
@@ -879,5 +765,4 @@ module.exports = {
   forgotPassword,
   resetPassword,
   registerAdmin,
-  switchRole,
 };

@@ -53,17 +53,14 @@ const protect = async (req, res, next) => {
   }
 };
 
-// Grant access to specific roles
+// Grant access to specific roles - strict mutually exclusive role checking
 const authorize = (...roles) => {
   return (req, res, next) => {
-    const userRole = req.user.role;
-    const userRoles = Array.isArray(req.user.roles) && req.user.roles.length > 0 ? req.user.roles : [userRole];
-
-    const hasPermission = roles.some((r) => userRoles.includes(r) || userRole === r);
-    if (!hasPermission) {
+    const userRole = req.user?.role;
+    if (!userRole || !roles.includes(userRole)) {
       return res.status(403).json({
         success: false,
-        message: `User role '${userRole}' is not authorized to access this route.`,
+        message: `User role '${userRole || 'unknown'}' is not authorized to access this route.`,
       });
     }
     next();
