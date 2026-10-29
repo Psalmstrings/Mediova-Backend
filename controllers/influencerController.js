@@ -6,6 +6,7 @@ const VerificationSubmission = require('../models/VerificationSubmission');
 const Transaction = require('../models/Transaction');
 const Notification = require('../models/Notification');
 const Campaign = require('../models/Campaign');
+const TermsAcceptance = require('../models/TermsAcceptance');
 const { processUploadedFile } = require('../middleware/upload');
 const { normalizePhoneNumber, isValidPhoneNumber } = require('../utils/locations');
 
@@ -446,6 +447,26 @@ const acceptGig = async (req, res, next) => {
     gig.status = 'accepted';
     gig.acceptedAt = new Date();
     await gig.save();
+
+    // Record Schedule B Influencer Declaration
+    try {
+      await TermsAcceptance.create({
+        userId: req.user._id,
+        role: req.user.role || 'influencer',
+        documentIdentifier: 'mediova_terms_and_conditions_of_service',
+        declarationType: 'influencer_schedule_b',
+        source: 'influencer_gig_declaration',
+        ipAddress: req.ip || req.connection?.remoteAddress,
+        userAgent: req.headers ? req.headers['user-agent'] : undefined,
+        metadata: {
+          gigId: gig._id,
+          gigNumber: gig.gigNumber,
+          campaignId: gig.campaignId,
+        },
+      });
+    } catch (declErr) {
+      console.warn('Influencer Schedule B Declaration audit logging failed:', declErr.message);
+    }
 
     await Notification.create({
       userId: req.user._id,

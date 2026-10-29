@@ -148,7 +148,7 @@ runTest('Model Schemas: Load RefundRequest, Complaint, SupportTicket, Influencer
   assert.ok(Campaign.schema.path('completedWork.summary'));
   assert.ok(User.schema.path('resetPasswordToken'));
   assert.ok(User.schema.path('termsAccepted'));
-  assert.ok(User.schema.path('termsAcceptedVersion'));
+  assert.ok(User.schema.path('requiresTermsAcceptance'));
   assert.ok(User.schema.path('termsAcceptedAt'));
   assert.ok(User.schema.path('country'));
   assert.ok(User.schema.path('whatsappNumber'));

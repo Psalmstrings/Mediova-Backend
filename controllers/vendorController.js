@@ -8,6 +8,7 @@ const ReachPackage = require('../models/ReachPackage');
 const AdminSettings = require('../models/AdminSettings');
 const RefundRequest = require('../models/RefundRequest');
 const Payment = require('../models/Payment');
+const TermsAcceptance = require('../models/TermsAcceptance');
 const { sendEmail } = require('../config/email');
 const emailTemplates = require('../utils/emailTemplates');
 const { processUploadedFile } = require('../middleware/upload');
@@ -316,6 +317,26 @@ const createCampaign = async (req, res, next) => {
         receiptPublicId: receiptData.publicId,
         status: 'submitted',
       });
+    }
+
+    // Record Schedule A Vendor Declaration
+    try {
+      await TermsAcceptance.create({
+        userId: req.user._id,
+        role: req.user.role || 'vendor',
+        documentIdentifier: 'mediova_terms_and_conditions_of_service',
+        declarationType: 'vendor_schedule_a',
+        source: 'vendor_campaign_declaration',
+        ipAddress: req.ip || req.connection?.remoteAddress,
+        userAgent: req.headers ? req.headers['user-agent'] : undefined,
+        metadata: {
+          campaignId: campaign._id,
+          orderNumber: campaign.orderNumber,
+          campaignTitle: campaign.title,
+        },
+      });
+    } catch (declErr) {
+      console.warn('Vendor Schedule A Declaration audit logging failed:', declErr.message);
     }
 
     // Notification for vendor

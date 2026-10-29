@@ -81,12 +81,12 @@ const userSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
-    termsAcceptedVersion: {
-      type: String,
-      default: '2.0',
-    },
     termsAcceptedAt: {
       type: Date,
+    },
+    requiresTermsAcceptance: {
+      type: Boolean,
+      default: false,
     },
     role: {
       type: String,

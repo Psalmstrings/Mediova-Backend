@@ -4,6 +4,7 @@ const InfluencerProfile = require('../models/InfluencerProfile');
 const VendorProfile = require('../models/VendorProfile');
 const VerificationToken = require('../models/VerificationToken');
 const Notification = require('../models/Notification');
+const TermsAcceptance = require('../models/TermsAcceptance');
 const generateToken = require('../utils/generateToken');
 const { sendEmail } = require('../config/email');
 const emailTemplates = require('../utils/emailTemplates');
@@ -92,8 +93,18 @@ const googleAuth = async (req, res, next) => {
         const { whatsappNumber, country, region, subDivision, area, termsAccepted } = profileData;
         if (termsAccepted) {
           user.termsAccepted = true;
-          user.termsAcceptedVersion = '2.0';
           user.termsAcceptedAt = new Date();
+          user.requiresTermsAcceptance = false;
+          await TermsAcceptance.create({
+            userId: user._id,
+            role: user.role,
+            source: 'registration',
+            declarationType: 'general',
+            documentIdentifier: 'terms_and_conditions',
+            acceptedAt: new Date(),
+            ipAddress: req.ip || req.headers['x-forwarded-for'] || '',
+            userAgent: req.headers['user-agent'] || '',
+          }).catch(() => {});
         }
         if (whatsappNumber) {
           const norm = normalizePhoneNumber(whatsappNumber);
@@ -140,7 +151,9 @@ const googleAuth = async (req, res, next) => {
           emailVerified: user.emailVerified,
           accountStatus: user.accountStatus,
           influencerVerificationStatus: user.influencerVerificationStatus,
-          termsAccepted: user.termsAccepted,
+          termsAccepted: Boolean(user.termsAccepted),
+          termsAcceptedAt: user.termsAcceptedAt,
+          requiresTermsAcceptance: Boolean(!user.termsAccepted || user.requiresTermsAcceptance),
           profile,
         },
       });
@@ -200,10 +213,21 @@ const googleAuth = async (req, res, next) => {
       emailVerified: true,
       accountStatus: 'active',
       termsAccepted: true,
-      termsAcceptedVersion: '2.0',
       termsAcceptedAt: new Date(),
+      requiresTermsAcceptance: false,
       influencerVerificationStatus: role === 'influencer' ? 'pending' : 'none',
     });
+
+    await TermsAcceptance.create({
+      userId: newUser._id,
+      role: newUser.role,
+      source: 'registration',
+      declarationType: 'general',
+      documentIdentifier: 'terms_and_conditions',
+      acceptedAt: new Date(),
+      ipAddress: req.ip || req.headers['x-forwarded-for'] || '',
+      userAgent: req.headers['user-agent'] || '',
+    }).catch(() => {});
 
     let newProfile = null;
     if (newUser.role === 'influencer') {
@@ -259,7 +283,9 @@ const googleAuth = async (req, res, next) => {
         emailVerified: true,
         accountStatus: newUser.accountStatus,
         influencerVerificationStatus: newUser.influencerVerificationStatus,
-        termsAccepted: newUser.termsAccepted,
+        termsAccepted: true,
+        termsAcceptedAt: newUser.termsAcceptedAt,
+        requiresTermsAcceptance: false,
         profile: newProfile,
       },
     });
@@ -381,10 +407,21 @@ const register = async (req, res, next) => {
       emailVerified: true,
       accountStatus: 'active',
       termsAccepted: true,
-      termsAcceptedVersion: '2.0',
       termsAcceptedAt: new Date(),
+      requiresTermsAcceptance: false,
       influencerVerificationStatus: role === 'influencer' ? 'pending' : 'none',
     });
+
+    await TermsAcceptance.create({
+      userId: user._id,
+      role: user.role,
+      source: 'registration',
+      declarationType: 'general',
+      documentIdentifier: 'terms_and_conditions',
+      acceptedAt: new Date(),
+      ipAddress: req.ip || req.headers['x-forwarded-for'] || '',
+      userAgent: req.headers['user-agent'] || '',
+    }).catch(() => {});
 
     // Create role-specific profile
     let profile = null;
@@ -518,12 +555,13 @@ const login = async (req, res, next) => {
         countryCode: user.countryCode || 'NG',
         location: user.location,
         role: user.role,
-        roles: Array.isArray(user.roles) && user.roles.length > 0 ? user.roles : [user.role],
         profileImage: user.profileImage,
         emailVerified: user.emailVerified,
         accountStatus: user.accountStatus,
         influencerVerificationStatus: user.influencerVerificationStatus || profile?.verificationStatus || 'pending',
-        termsAccepted: user.termsAccepted,
+        termsAccepted: Boolean(user.termsAccepted),
+        termsAcceptedAt: user.termsAcceptedAt,
+        requiresTermsAcceptance: Boolean(!user.termsAccepted || user.requiresTermsAcceptance),
         profile,
       },
     });
@@ -567,7 +605,9 @@ const getMe = async (req, res, next) => {
         emailVerified: user.emailVerified,
         accountStatus: user.accountStatus,
         influencerVerificationStatus: user.influencerVerificationStatus || profile?.verificationStatus || 'pending',
-        termsAccepted: user.termsAccepted,
+        termsAccepted: Boolean(user.termsAccepted),
+        termsAcceptedAt: user.termsAcceptedAt,
+        requiresTermsAcceptance: Boolean(!user.termsAccepted || user.requiresTermsAcceptance),
         profile,
       },
     });
@@ -731,8 +771,8 @@ const registerAdmin = async (req, res, next) => {
       password,
       role: 'admin',
       termsAccepted: true,
-      termsAcceptedVersion: '2.0',
       termsAcceptedAt: new Date(),
+      requiresTermsAcceptance: false,
       emailVerified: true,
       accountStatus: 'active',
     });
@@ -748,7 +788,76 @@ const registerAdmin = async (req, res, next) => {
         name: adminUser.name,
         email: adminUser.email,
         role: adminUser.role,
+        termsAccepted: true,
+        termsAcceptedAt: adminUser.termsAcceptedAt,
+        requiresTermsAcceptance: false,
       },
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * @desc    Accept Terms and Conditions (Login / Renewed / Declarations)
+ * @route   POST /api/auth/accept-terms
+ * @access  Private
+ */
+const acceptTerms = async (req, res, next) => {
+  try {
+    const { termsAccepted, source = 'login', declarationType = 'general', metadata = {} } = req.body;
+    if (termsAccepted !== true && termsAccepted !== 'true') {
+      return res.status(400).json({
+        success: false,
+        message: 'You must explicitly agree to the MEDIOVA Terms and Conditions to proceed.',
+      });
+    }
+
+    const user = await User.findById(req.user._id);
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'User account not found.' });
+    }
+
+    user.termsAccepted = true;
+    user.termsAcceptedAt = new Date();
+    user.requiresTermsAcceptance = false;
+    await user.save();
+
+    const auditRecord = await TermsAcceptance.create({
+      userId: user._id,
+      role: user.role,
+      source: [
+        'registration',
+        'login',
+        'renewed_acceptance',
+        'vendor_campaign_declaration',
+        'influencer_gig_declaration',
+      ].includes(source)
+        ? source
+        : 'login',
+      declarationType: ['general', 'vendor_schedule_a', 'influencer_schedule_b'].includes(declarationType)
+        ? declarationType
+        : 'general',
+      documentIdentifier: 'terms_and_conditions',
+      acceptedAt: new Date(),
+      ipAddress: req.ip || req.headers['x-forwarded-for'] || '',
+      userAgent: req.headers['user-agent'] || '',
+      metadata,
+    });
+
+    res.status(200).json({
+      success: true,
+      message: 'Terms and Conditions accepted successfully.',
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        termsAccepted: user.termsAccepted,
+        termsAcceptedAt: user.termsAcceptedAt,
+        requiresTermsAcceptance: false,
+      },
+      acceptanceId: auditRecord._id,
     });
   } catch (error) {
     next(error);
@@ -765,4 +874,5 @@ module.exports = {
   forgotPassword,
   resetPassword,
   registerAdmin,
+  acceptTerms,
 };
